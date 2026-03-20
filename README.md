@@ -2,15 +2,6 @@
 
 Session-oriented workspace manager for AI coding workflows.
 
-## License
-
-This project is currently distributed as **NO LICENSE**.
-
-## Scope (v0.1.0)
-
-- Implemented: `new`, `open`, `list`, `rm`, `archive`, `doctor`
-- Supported OS: Linux, macOS
-
 ## Quick Start
 
 1. Install tools with `mise`.
