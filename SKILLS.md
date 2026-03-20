@@ -5,7 +5,7 @@ This document defines how an AI agent should operate `taskspace` safely and cons
 ## Core model
 
 - One task equals one session.
-- A session is created under `~/taskspace/sessions/<name>`.
+- A session is created directly under `~/taskspace/<name>`.
 - Repository code lives in `repos/`.
 - AI working context lives in `context/` and is non-commit data by default.
 

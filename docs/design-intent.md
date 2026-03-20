@@ -23,8 +23,8 @@ It creates one isolated workspace for one task, with repository files and AI con
 
 ## Why the structure is this way
 
-- `~/taskspace/sessions/<session>` is the active work area.
-- `~/taskspace/archive/` stores archived sessions to keep deletion reversible by default.
+- `~/taskspace/<session>` is the active work area (session directories are directly under the taskspace root).
+- `~/taskspace/.archive/` stores archived sessions to keep deletion reversible by default.
 - `context/` stores ephemeral AI notes (`MEMORY`, `PLAN`, `CONSTRAINTS`, `DECISIONS`, `LINKS`).
 - `repos/` stores cloned repositories for this session only.
 

@@ -1,12 +1,14 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use taskspace_core::TaskspaceError;
 
+/// Returns the taskspace root directory: `~/taskspace/`.
+/// Session directories are created directly under this root.
 pub fn default_sessions_root() -> Result<PathBuf> {
     let home = home::home_dir()
         .ok_or_else(|| anyhow!(TaskspaceError::Internal("cannot resolve HOME".to_string())))?;
-    Ok(home.join("taskspace").join("sessions"))
+    Ok(home.join("taskspace"))
 }
 
 pub fn global_skills_paths() -> Result<Vec<PathBuf>> {
@@ -18,11 +20,7 @@ pub fn global_skills_paths() -> Result<Vec<PathBuf>> {
     ])
 }
 
+/// Returns the archive root directory: `<taskspace_root>/.archive/`.
 pub fn archive_root(root_dir: &Path) -> Result<PathBuf> {
-    let parent = root_dir.parent().ok_or_else(|| {
-        anyhow!(TaskspaceError::Internal(
-            "cannot resolve archive root from sessions root".to_string()
-        ))
-    })?;
-    Ok(parent.join("archive"))
+    Ok(root_dir.join(".archive"))
 }

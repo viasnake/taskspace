@@ -5,7 +5,7 @@ use tempfile::tempdir;
 #[test]
 fn binary_new_and_list_work() {
     let temp = tempdir().expect("tempdir");
-    let root = temp.path().join("sessions");
+    let root = temp.path().to_path_buf();
 
     let mut cmd = Command::cargo_bin("taskspace").expect("binary");
     cmd.arg("--root")
@@ -26,7 +26,7 @@ fn binary_new_and_list_work() {
 #[test]
 fn binary_rm_requires_yes() {
     let temp = tempdir().expect("tempdir");
-    let root = temp.path().join("sessions");
+    let root = temp.path().to_path_buf();
 
     let mut new_cmd = Command::cargo_bin("taskspace").expect("binary");
     new_cmd
@@ -60,7 +60,7 @@ fn binary_version_short_v_works() {
 #[test]
 fn binary_list_empty_shows_message() {
     let temp = tempdir().expect("tempdir");
-    let root = temp.path().join("sessions");
+    let root = temp.path().to_path_buf();
 
     let mut cmd = Command::cargo_bin("taskspace").expect("binary");
     cmd.arg("--root")
@@ -74,7 +74,7 @@ fn binary_list_empty_shows_message() {
 #[test]
 fn binary_open_without_name_uses_latest_session() {
     let temp = tempdir().expect("tempdir");
-    let root = temp.path().join("sessions");
+    let root = temp.path().to_path_buf();
 
     let mut new_old = Command::cargo_bin("taskspace").expect("binary");
     new_old
@@ -101,9 +101,11 @@ fn binary_open_without_name_uses_latest_session() {
     fs::write(&old_file, "old").expect("touch old");
     fs::write(&new_file, "new").expect("touch new");
 
-    let bin_dir = temp.path().join("bin");
+    // Create stub directory OUTSIDE the root to avoid being treated as a session
+    let stub_temp = tempdir().expect("stub tempdir");
+    let bin_dir = stub_temp.path().join("bin");
     fs::create_dir_all(&bin_dir).expect("create bin dir");
-    let marker = temp.path().join("called.txt");
+    let marker = root.join("called.txt");
     let stub = bin_dir.join("opencode");
     fs::write(
         &stub,
@@ -131,13 +133,18 @@ fn binary_open_without_name_uses_latest_session() {
         .success();
 
     let called = fs::read_to_string(&marker).expect("read marker");
-    assert!(called.contains("/sessions/new"));
+    // For Opencode editor, the session directory is passed (not workspace.code-workspace)
+    // We verify that "new" session is opened (the latest one)
+    assert!(
+        called.contains("/new") || called.ends_with("new"),
+        "expected /new in path, got: {called}"
+    );
 }
 
 #[test]
 fn binary_aliases_work() {
     let temp = tempdir().expect("tempdir");
-    let root = temp.path().join("sessions");
+    let root = temp.path().to_path_buf();
 
     let mut new_cmd = Command::cargo_bin("taskspace").expect("binary");
     new_cmd

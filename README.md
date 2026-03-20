@@ -91,22 +91,24 @@ This file teaches the AI:
 
 ```
 ~/taskspace/
-  sessions/
-    <session>/
-      SESSION.md
-      AGENTS.md
-      workspace.yaml
+  .archive/
+    <session>-<timestamp>/
 
-      workspace.code-workspace
+  <session>/
+    SESSION.md
+    AGENTS.md
+    workspace.yaml
 
-      .opencode/
-        opencode.jsonc
+    workspace.code-workspace
 
-      context/
-      repos/
-      references/
-      notes/
-      output/
+    .opencode/
+      opencode.jsonc
+
+    context/
+    repos/
+    references/
+    notes/
+    output/
 ```
 
 ## ⚙️ Commands

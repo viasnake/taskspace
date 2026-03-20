@@ -14,13 +14,13 @@ pub fn run(app: &TaskspaceApp) -> Result<DoctorReport> {
     if app.root_dir().exists() {
         checks.push(DoctorCheck {
             level: DoctorLevel::Ok,
-            message: format!("sessions root exists: {}", app.root_dir().display()),
+            message: format!("taskspace root exists: {}", app.root_dir().display()),
         });
     } else {
         checks.push(DoctorCheck {
             level: DoctorLevel::Warn,
             message: format!(
-                "sessions root does not exist yet (it will be created on first new): {}",
+                "taskspace root does not exist yet (it will be created on first new): {}",
                 app.root_dir().display()
             ),
         });
@@ -51,13 +51,13 @@ pub fn run(app: &TaskspaceApp) -> Result<DoctorReport> {
     if archive_root.exists() {
         checks.push(DoctorCheck {
             level: DoctorLevel::Ok,
-            message: format!("archive root exists: {}", archive_root.display()),
+            message: format!("archive directory exists: {}", archive_root.display()),
         });
     } else {
         checks.push(DoctorCheck {
             level: DoctorLevel::Warn,
             message: format!(
-                "archive root does not exist yet (it will be created on first archive): {}",
+                "archive directory does not exist yet (it will be created on first archive): {}",
                 archive_root.display()
             ),
         });

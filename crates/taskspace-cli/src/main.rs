@@ -148,7 +148,7 @@ mod tests {
     #[test]
     fn run_new_list_archive_rm_doctor_flow() {
         let temp = tempdir().expect("tempdir");
-        let root = temp.path().join("sessions");
+        let root = temp.path().to_path_buf();
 
         let out = run_with_args([
             "taskspace",
@@ -244,7 +244,7 @@ mod tests {
     #[test]
     fn doctor_outputs_fail_label() {
         let temp = tempdir().expect("tempdir");
-        let root = temp.path().join("sessions");
+        let root = temp.path().to_path_buf();
 
         run_with_args([
             "taskspace",
