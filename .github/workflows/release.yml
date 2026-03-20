@@ -8,6 +8,10 @@ on:
 env:
   CARGO_TERM_COLOR: always
   BINARY_NAME: taskspace
+  PACKAGE_NAME: taskspace-cli
+
+permissions:
+  contents: read
 
 jobs:
   quality:
@@ -44,7 +48,7 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
       - name: Tests
-        run: cargo test --workspace
+        run: cargo test --workspace --all-features
 
       - name: Cargo audit
         run: cargo audit
@@ -61,6 +65,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
+
     strategy:
       fail-fast: false
       matrix:
@@ -89,7 +94,7 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: Build
-        run: cargo build --release --package taskspace-cli --bin taskspace --target ${{ matrix.target }}
+        run: cargo build --release --package ${{ env.PACKAGE_NAME }} --bin ${{ env.BINARY_NAME }} --target ${{ matrix.target }}
 
       - name: Package
         shell: bash
@@ -98,13 +103,15 @@ jobs:
 
           VERSION="${GITHUB_REF_NAME#v}"
           TARGET="${{ matrix.target }}"
-          ARCHIVE="taskspace-v${VERSION}-${TARGET}.tar.gz"
+          ARCHIVE="${BINARY_NAME}-v${VERSION}-${TARGET}.tar.gz"
 
+          rm -rf dist
           mkdir -p dist/package
-          cp "target/${TARGET}/release/taskspace" "dist/package/taskspace"
-          chmod +x "dist/package/taskspace"
 
-          tar -czf "dist/${ARCHIVE}" -C dist/package taskspace
+          cp "target/${TARGET}/release/${BINARY_NAME}" "dist/package/${BINARY_NAME}"
+          chmod +x "dist/package/${BINARY_NAME}"
+
+          tar -czf "dist/${ARCHIVE}" -C dist/package "${BINARY_NAME}"
 
           if command -v sha256sum >/dev/null 2>&1; then
             sha256sum "dist/${ARCHIVE}" > "dist/${ARCHIVE}.sha256"
@@ -113,8 +120,32 @@ jobs:
           fi
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.target }}
           path: dist/*
           if-no-files-found: error
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Show downloaded files
+        run: find dist -type f | sort
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/**/*.tar.gz
+            dist/**/*.sha256
