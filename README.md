@@ -36,15 +36,6 @@ taskspace doctor
 
 `rm` is destructive and requires `--yes` unless `--dry-run` is used.
 
-## Global SKILLS Template
-
-Use `templates/SKILLS.md` as a starting point for either:
-
-- `~/.taskspace/SKILLS.md`, or
-- `~/.config/taskspace/SKILLS.md`
-
-The template is designed to teach AI agents how to operate taskspace safely and consistently.
-
 ## Design intent
 
 See `docs/design-intent.md`.
