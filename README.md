@@ -4,14 +4,11 @@ Session-oriented workspace manager for AI coding workflows.
 
 ## Quick Start
 
-1. Install tools with `mise`.
-2. Build CLI.
-3. Create a session and open it.
+1. Install tools with `mise` or `brew`:
 
 ```bash
-mise install
-mise run build
-./target/debug/taskspace new demo --open --editor code
+brew install viasnake/tap/taskspace
+mise use -g github:viasnake/taskspace@latest
 ```
 
 ## Commands
