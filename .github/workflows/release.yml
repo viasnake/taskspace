@@ -69,7 +69,7 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-          - os: macos-13
+          - os: macos-15-intel
             target: x86_64-apple-darwin
           - os: macos-14
             target: aarch64-apple-darwin
@@ -98,13 +98,13 @@ jobs:
 
           VERSION="${GITHUB_REF_NAME#v}"
           TARGET="${{ matrix.target }}"
-          ARCHIVE="${BINARY_NAME}-v${VERSION}-${TARGET}.tar.gz"
+          ARCHIVE="taskspace-v${VERSION}-${TARGET}.tar.gz"
 
           mkdir -p dist/package
-          cp "target/${TARGET}/release/${BINARY_NAME}" "dist/package/${BINARY_NAME}"
-          chmod +x "dist/package/${BINARY_NAME}"
+          cp "target/${TARGET}/release/taskspace" "dist/package/taskspace"
+          chmod +x "dist/package/taskspace"
 
-          tar -czf "dist/${ARCHIVE}" -C dist/package "${BINARY_NAME}"
+          tar -czf "dist/${ARCHIVE}" -C dist/package taskspace
 
           if command -v sha256sum >/dev/null 2>&1; then
             sha256sum "dist/${ARCHIVE}" > "dist/${ARCHIVE}.sha256"
@@ -118,36 +118,3 @@ jobs:
           name: release-${{ matrix.target }}
           path: dist/*
           if-no-files-found: error
-
-  release:
-    name: Publish Release
-    needs: build
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-
-    steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v6
-        with:
-          path: dist
-          merge-multiple: true
-
-      - name: Generate SHA256SUMS
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd dist
-
-          : > SHA256SUMS
-          for f in *.sha256; do
-            cat "$f" >> SHA256SUMS
-          done
-
-      - name: Publish GitHub release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            dist/*.tar.gz
-            dist/*.sha256
-            dist/SHA256SUMS
