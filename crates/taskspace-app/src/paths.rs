@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use taskspace_core::TaskspaceError;
 
 /// Returns the taskspace root directory: `~/taskspace/`.
