@@ -32,6 +32,7 @@ It creates one isolated workspace for one task, with repository files and AI con
 
 - `rm` is destructive and requires `--yes`.
 - `rm --dry-run` lets users verify targets without deletion.
+- `open` without a name opens the latest session by directory modified time.
 - External commands are executed with argument lists (not shell strings).
 - Session and repo names are validated before file operations.
 - `doctor` checks structure, metadata, and command availability.
@@ -39,6 +40,8 @@ It creates one isolated workspace for one task, with repository files and AI con
 ## Stable contracts
 
 - CLI commands are stable: `new`, `open`, `list`, `rm`, `archive`, `doctor`.
+- Command aliases are supported: `remove` for `rm`, `ls` for `list`.
+- Version flags are supported: `-v`, `-V`, `--version`.
 - `workspace.yaml` includes a schema `version`.
 - Exit codes are mapped by error category.
 

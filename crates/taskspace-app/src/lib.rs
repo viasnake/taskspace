@@ -5,12 +5,17 @@ mod spec;
 mod template;
 mod validation;
 
+use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use anyhow::{Result, anyhow};
 use chrono::Utc;
 use taskspace_core::{EditorKind, RepoSpec, SessionName, TaskspaceError};
-use taskspace_infra_fs::{create_dir, list_directories, move_dir, remove_dir_all, run_command};
+use taskspace_infra_fs::{
+    create_dir, list_directories, list_directories_with_modified, move_dir, remove_dir_all,
+    run_command,
+};
 
 #[derive(Debug, Clone)]
 pub struct TaskspaceApp {
@@ -27,8 +32,14 @@ pub struct NewSessionRequest {
 
 #[derive(Debug, Clone)]
 pub struct OpenSessionRequest {
-    pub name: SessionName,
+    pub target: OpenSessionTarget,
     pub editor: EditorKind,
+}
+
+#[derive(Debug, Clone)]
+pub enum OpenSessionTarget {
+    Name(SessionName),
+    Last,
 }
 
 #[derive(Debug, Clone)]
@@ -102,7 +113,7 @@ impl TaskspaceApp {
 
         if request.open_after_create {
             self.open_session(OpenSessionRequest {
-                name: request.name,
+                target: OpenSessionTarget::Name(request.name),
                 editor: request.editor,
             })?;
         }
@@ -115,11 +126,20 @@ impl TaskspaceApp {
     }
 
     pub fn open_session(&self, request: OpenSessionRequest) -> Result<()> {
-        let session_dir = self.root_dir.join(request.name.as_str());
+        let session_name = match request.target {
+            OpenSessionTarget::Name(name) => name,
+            OpenSessionTarget::Last => self.find_latest_session_name()?.ok_or_else(|| {
+                anyhow!(TaskspaceError::NotFound(
+                    "no session specified and no recent session found".to_string()
+                ))
+            })?,
+        };
+
+        let session_dir = self.root_dir.join(session_name.as_str());
         if !session_dir.exists() {
             return Err(anyhow!(TaskspaceError::NotFound(format!(
                 "session '{}' does not exist",
-                request.name.as_str()
+                session_name.as_str()
             ))));
         }
 
@@ -136,7 +156,7 @@ impl TaskspaceApp {
         run_command(command, &arg).map_err(|err| {
             anyhow!(TaskspaceError::ExternalCommand(format!(
                 "failed to open session '{}': {err}",
-                request.name.as_str()
+                session_name.as_str()
             )))
         })
     }
@@ -186,12 +206,36 @@ impl TaskspaceApp {
             return Ok(());
         }
         if !request.yes {
-            return Err(anyhow!(TaskspaceError::Usage(
-                "rm requires --yes for destructive operation".to_string(),
-            )));
+            return Err(anyhow!(TaskspaceError::Usage(format!(
+                "refusing to remove session '{}' without --yes\nhint: rerun with: taskspace rm {} --yes",
+                request.name.as_str(),
+                request.name.as_str()
+            ))));
         }
 
         remove_dir_all(&session_dir).map_err(map_infra_error)
+    }
+}
+
+impl TaskspaceApp {
+    fn find_latest_session_name(&self) -> Result<Option<SessionName>> {
+        let mut sessions: Vec<(SessionName, SystemTime)> =
+            list_directories_with_modified(&self.root_dir)
+                .map_err(map_infra_error)?
+                .into_iter()
+                .filter_map(|entry| {
+                    SessionName::parse(&entry.name)
+                        .ok()
+                        .map(|name| (name, entry.modified))
+                })
+                .collect();
+
+        sessions.sort_by(|left, right| match right.1.cmp(&left.1) {
+            Ordering::Equal => left.0.as_str().cmp(right.0.as_str()),
+            non_eq => non_eq,
+        });
+
+        Ok(sessions.into_iter().next().map(|(name, _)| name))
     }
 }
 
@@ -265,7 +309,7 @@ mod tests {
                 dry_run: false,
             })
             .expect_err("missing --yes");
-        assert!(format!("{err}").contains("requires --yes"));
+        assert!(format!("{err}").contains("without --yes"));
 
         app.remove_session(RemoveSessionRequest {
             name: SessionName::parse("demo").expect("name"),
@@ -280,5 +324,19 @@ mod tests {
             dry_run: false,
         })
         .expect("remove");
+    }
+
+    #[test]
+    fn open_last_fails_when_no_sessions_exist() {
+        let temp = tempdir().expect("temp dir");
+        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
+
+        let err = app
+            .open_session(OpenSessionRequest {
+                target: OpenSessionTarget::Last,
+                editor: EditorKind::Opencode,
+            })
+            .expect_err("open last without sessions should fail");
+        assert!(format!("{err}").contains("no session specified and no recent session found"));
     }
 }

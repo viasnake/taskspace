@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::error::ErrorKind;
+use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use taskspace_app::TaskspaceApp;
 use taskspace_core::TaskspaceError;
 
@@ -12,7 +13,18 @@ mod render;
 #[derive(Parser)]
 #[command(name = "taskspace")]
 #[command(version, about = "Session-oriented workspace manager for AI coding")]
+#[command(disable_version_flag = true)]
+#[command(propagate_version = true)]
 struct Cli {
+    #[arg(
+        short = 'v',
+        visible_short_alias = 'V',
+        long = "version",
+        action = ArgAction::Version,
+        global = true
+    )]
+    _version: Option<bool>,
+
     #[arg(long, global = true)]
     root: Option<PathBuf>,
 
@@ -32,11 +44,15 @@ pub(crate) enum Commands {
         editor: CliEditor,
     },
     Open {
-        name: String,
+        name: Option<String>,
         #[arg(long, value_enum, default_value_t = CliEditor::Opencode)]
         editor: CliEditor,
+        #[arg(long)]
+        last: bool,
     },
+    #[command(alias = "ls")]
     List,
+    #[command(alias = "remove")]
     Rm {
         name: String,
         #[arg(long)]
@@ -58,29 +74,69 @@ pub(crate) enum CliEditor {
 
 #[cfg(not(test))]
 fn main() {
-    match run_with_args(std::env::args_os()) {
-        Ok(lines) => {
-            for line in lines {
-                println!("{line}");
+    match parse_cli(std::env::args_os()) {
+        Ok(cli) => match run_with_cli(cli) {
+            Ok(lines) => {
+                for line in lines {
+                    println!("{line}");
+                }
             }
+            Err(err) => {
+                eprintln!("{err}");
+                std::process::exit(exit_code::from_error(&err));
+            }
+        },
+        Err(ParseOutcome::Display(text)) => {
+            print!("{text}");
+            std::process::exit(0);
         }
-        Err(err) => {
-            eprintln!("{err}");
-            std::process::exit(exit_code::from_error(&err));
+        Err(ParseOutcome::Usage(text)) => {
+            eprint!("{text}");
+            std::process::exit(2);
         }
     }
 }
 
+#[cfg(test)]
 fn run_with_args<I, T>(args: I) -> Result<Vec<String>, TaskspaceError>
 where
     I: IntoIterator<Item = T>,
     T: Into<std::ffi::OsString> + Clone,
 {
-    let cli = Cli::try_parse_from(args).map_err(|err| TaskspaceError::Usage(err.to_string()))?;
+    let cli = parse_cli(args).map_err(|outcome| match outcome {
+        ParseOutcome::Display(text) | ParseOutcome::Usage(text) => TaskspaceError::Usage(text),
+    })?;
+    run_with_cli(cli)
+}
+
+fn run_with_cli(cli: Cli) -> Result<Vec<String>, TaskspaceError> {
     let app = TaskspaceApp::new(cli.root).map_err(execute::map_anyhow_error)?;
     let request = parse::parse_command(cli.command)?;
     let result = execute::execute(&app, request)?;
     Ok(render::render(result))
+}
+
+enum ParseOutcome {
+    Display(String),
+    Usage(String),
+}
+
+fn parse_cli<I, T>(args: I) -> Result<Cli, ParseOutcome>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    match Cli::try_parse_from(args) {
+        Ok(cli) => Ok(cli),
+        Err(err) => match err.kind() {
+            ErrorKind::DisplayHelp
+            | ErrorKind::DisplayVersion
+            | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => {
+                Err(ParseOutcome::Display(err.to_string()))
+            }
+            _ => Err(ParseOutcome::Usage(err.to_string())),
+        },
+    }
 }
 
 #[cfg(test)]
@@ -164,6 +220,25 @@ mod tests {
         let err = run_with_args(["taskspace", "new"]).expect_err("parse should fail");
         assert!(matches!(err, TaskspaceError::Usage(_)));
         assert_eq!(exit_code::from_error(&err), 2);
+    }
+
+    #[test]
+    fn parse_help_and_version_as_display() {
+        assert!(matches!(
+            parse_cli(["taskspace", "-h"]),
+            Err(ParseOutcome::Display(_))
+        ));
+        assert!(matches!(
+            parse_cli(["taskspace", "-v"]),
+            Err(ParseOutcome::Display(_))
+        ));
+    }
+
+    #[test]
+    fn parse_open_conflicting_arguments_reports_usage() {
+        let err = run_with_args(["taskspace", "open", "demo", "--last"])
+            .expect_err("name and --last should conflict");
+        assert!(matches!(err, TaskspaceError::Usage(_)));
     }
 
     #[test]

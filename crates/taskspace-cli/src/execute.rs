@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use taskspace_app::{
-    ArchiveSessionRequest, DoctorReport, NewSessionRequest, OpenSessionRequest,
+    ArchiveSessionRequest, DoctorReport, NewSessionRequest, OpenSessionRequest, OpenSessionTarget,
     RemoveSessionRequest, TaskspaceApp,
 };
 use taskspace_core::{EditorKind, RepoSpec, SessionName, TaskspaceError};
@@ -15,7 +15,7 @@ pub enum CommandRequest {
         editor: EditorKind,
     },
     Open {
-        name: SessionName,
+        name: Option<SessionName>,
         editor: EditorKind,
     },
     List,
@@ -61,7 +61,11 @@ pub fn execute(
             Ok(CommandResult::Created(created))
         }
         CommandRequest::Open { name, editor } => {
-            app.open_session(OpenSessionRequest { name, editor })
+            let target = match name {
+                Some(name) => OpenSessionTarget::Name(name),
+                None => OpenSessionTarget::Last,
+            };
+            app.open_session(OpenSessionRequest { target, editor })
                 .map_err(map_anyhow_error)?;
             Ok(CommandResult::None)
         }

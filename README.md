@@ -124,19 +124,29 @@ taskspace new <name> \
 
 ```bash
 taskspace open <name>
+taskspace open        # opens latest session
+taskspace open --last # opens latest session explicitly
 ```
 
 ### List sessions
 
 ```bash
 taskspace list
+taskspace ls
 ```
+
+If there are no sessions, `taskspace list` prints `no sessions found`.
 
 ### Remove a session
 
 ```bash
 taskspace rm <name>
+taskspace remove <name>
+taskspace rm <name> --dry-run
+taskspace rm <name> --yes
 ```
+
+`rm` is destructive and requires `--yes` unless `--dry-run` is used.
 
 ### Archive a session
 
@@ -148,6 +158,14 @@ taskspace archive <name>
 
 ```bash
 taskspace doctor
+```
+
+### Show version
+
+```bash
+taskspace -v
+taskspace -V
+taskspace --version
 ```
 
 ## 🧩 AI Integration

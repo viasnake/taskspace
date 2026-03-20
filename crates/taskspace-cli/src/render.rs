@@ -6,7 +6,13 @@ pub fn render(result: CommandResult) -> Vec<String> {
     match result {
         CommandResult::None => Vec::new(),
         CommandResult::Created(path) => vec![format!("created session: {}", path.display())],
-        CommandResult::SessionList(list) => list,
+        CommandResult::SessionList(list) => {
+            if list.is_empty() {
+                vec!["no sessions found".to_string()]
+            } else {
+                list
+            }
+        }
         CommandResult::Removed { name, dry_run } => {
             if dry_run {
                 vec![format!("dry-run: session '{name}' can be removed")]

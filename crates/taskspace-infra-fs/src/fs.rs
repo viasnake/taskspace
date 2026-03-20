@@ -2,8 +2,15 @@ use std::fs;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use anyhow::{Context, Result};
+
+#[derive(Debug, Clone)]
+pub struct DirectoryWithModified {
+    pub name: String,
+    pub modified: SystemTime,
+}
 
 pub fn create_dir(path: &Path) -> Result<()> {
     fs::create_dir_all(path)
@@ -38,6 +45,33 @@ pub fn list_directories(path: &Path) -> Result<Vec<String>> {
 
     names.sort();
     Ok(names)
+}
+
+pub fn list_directories_with_modified(path: &Path) -> Result<Vec<DirectoryWithModified>> {
+    let mut entries = Vec::new();
+    if !path.exists() {
+        return Ok(entries);
+    }
+
+    for entry in
+        fs::read_dir(path).with_context(|| format!("failed to read: {}", path.display()))?
+    {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+
+        let modified = entry
+            .metadata()?
+            .modified()
+            .with_context(|| format!("failed to read modified time: {}", entry.path().display()))?;
+        entries.push(DirectoryWithModified {
+            name: entry.file_name().to_string_lossy().to_string(),
+            modified,
+        });
+    }
+
+    Ok(entries)
 }
 
 pub fn canonicalize_if_exists(raw: &str) -> Option<PathBuf> {

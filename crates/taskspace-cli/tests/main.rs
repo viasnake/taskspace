@@ -1,4 +1,5 @@
 use assert_cmd::Command;
+use std::fs;
 use tempfile::tempdir;
 
 #[test]
@@ -43,5 +44,126 @@ fn binary_rm_requires_yes() {
         .arg("rm")
         .arg("demo")
         .assert()
-        .failure();
+        .failure()
+        .stderr(predicates::str::contains("without --yes"));
+}
+
+#[test]
+fn binary_version_short_v_works() {
+    let mut cmd = Command::cargo_bin("taskspace").expect("binary");
+    cmd.arg("-v")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("taskspace"));
+}
+
+#[test]
+fn binary_list_empty_shows_message() {
+    let temp = tempdir().expect("tempdir");
+    let root = temp.path().join("sessions");
+
+    let mut cmd = Command::cargo_bin("taskspace").expect("binary");
+    cmd.arg("--root")
+        .arg(root.to_str().expect("utf8"))
+        .arg("list")
+        .assert()
+        .success()
+        .stdout("no sessions found\n");
+}
+
+#[test]
+fn binary_open_without_name_uses_latest_session() {
+    let temp = tempdir().expect("tempdir");
+    let root = temp.path().join("sessions");
+
+    let mut new_old = Command::cargo_bin("taskspace").expect("binary");
+    new_old
+        .arg("--root")
+        .arg(root.to_str().expect("utf8"))
+        .arg("new")
+        .arg("old")
+        .assert()
+        .success();
+
+    let mut new_new = Command::cargo_bin("taskspace").expect("binary");
+    new_new
+        .arg("--root")
+        .arg(root.to_str().expect("utf8"))
+        .arg("new")
+        .arg("new")
+        .assert()
+        .success();
+
+    let old_dir = root.join("old");
+    let new_dir = root.join("new");
+    let old_file = old_dir.join("SESSION.md");
+    let new_file = new_dir.join("SESSION.md");
+    fs::write(&old_file, "old").expect("touch old");
+    fs::write(&new_file, "new").expect("touch new");
+
+    let bin_dir = temp.path().join("bin");
+    fs::create_dir_all(&bin_dir).expect("create bin dir");
+    let marker = temp.path().join("called.txt");
+    let stub = bin_dir.join("opencode");
+    fs::write(
+        &stub,
+        format!("#!/bin/sh\nprintf '%s' \"$1\" > '{}'\n", marker.display()),
+    )
+    .expect("write stub");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&stub).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&stub, perms).expect("chmod");
+    }
+
+    let original_path = std::env::var("PATH").unwrap_or_default();
+    let path_value = format!("{}:{}", bin_dir.display(), original_path);
+
+    let mut open_cmd = Command::cargo_bin("taskspace").expect("binary");
+    open_cmd
+        .env("PATH", path_value)
+        .arg("--root")
+        .arg(root.to_str().expect("utf8"))
+        .arg("open")
+        .assert()
+        .success();
+
+    let called = fs::read_to_string(&marker).expect("read marker");
+    assert!(called.contains("/sessions/new"));
+}
+
+#[test]
+fn binary_aliases_work() {
+    let temp = tempdir().expect("tempdir");
+    let root = temp.path().join("sessions");
+
+    let mut new_cmd = Command::cargo_bin("taskspace").expect("binary");
+    new_cmd
+        .arg("--root")
+        .arg(root.to_str().expect("utf8"))
+        .arg("new")
+        .arg("demo")
+        .assert()
+        .success();
+
+    let mut ls_cmd = Command::cargo_bin("taskspace").expect("binary");
+    ls_cmd
+        .arg("--root")
+        .arg(root.to_str().expect("utf8"))
+        .arg("ls")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("demo"));
+
+    let mut remove_cmd = Command::cargo_bin("taskspace").expect("binary");
+    remove_cmd
+        .arg("--root")
+        .arg(root.to_str().expect("utf8"))
+        .arg("remove")
+        .arg("demo")
+        .arg("--yes")
+        .assert()
+        .success();
 }

@@ -92,7 +92,7 @@ impl RepoSpec {
 
 #[derive(Debug, Error)]
 pub enum TaskspaceError {
-    #[error("usage error: {0}")]
+    #[error("error: {0}")]
     Usage(String),
 
     #[error("conflict: {0}")]

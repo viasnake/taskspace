@@ -19,10 +19,18 @@ pub fn parse_command(command: Commands) -> Result<CommandRequest, TaskspaceError
             open_after_create: open,
             editor: editor.into(),
         }),
-        Commands::Open { name, editor } => Ok(CommandRequest::Open {
-            name: SessionName::parse(&name)?,
-            editor: editor.into(),
-        }),
+        Commands::Open { name, editor, last } => {
+            if name.is_some() && last {
+                return Err(TaskspaceError::Usage(
+                    "cannot use <NAME> with --last".to_string(),
+                ));
+            }
+            let parsed_name = name.as_deref().map(SessionName::parse).transpose()?;
+            Ok(CommandRequest::Open {
+                name: parsed_name,
+                editor: editor.into(),
+            })
+        }
         Commands::List => Ok(CommandRequest::List),
         Commands::Rm { name, yes, dry_run } => Ok(CommandRequest::Remove {
             name: SessionName::parse(&name)?,
