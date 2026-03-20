@@ -3,12 +3,13 @@ use std::path::Path;
 use anyhow::Result;
 use taskspace_infra_fs::run_command_capture;
 
+use crate::config::EditorRegistry;
 use crate::paths::{archive_root, global_skills_paths};
 use crate::spec;
 use crate::validation::{validate_opencode_config, validate_workspace_yaml};
 use crate::{DoctorCheck, DoctorLevel, DoctorReport, TaskspaceApp};
 
-pub fn run(app: &TaskspaceApp) -> Result<DoctorReport> {
+pub fn run(app: &TaskspaceApp, registry: &EditorRegistry) -> Result<DoctorReport> {
     let mut checks = Vec::new();
 
     if app.root_dir().exists() {
@@ -63,16 +64,30 @@ pub fn run(app: &TaskspaceApp) -> Result<DoctorReport> {
         });
     }
 
-    for cmd in ["git", "code", "opencode"] {
-        let level = if run_command_capture(cmd, &["--version".to_string()]).is_ok() {
-            DoctorLevel::Ok
-        } else {
-            DoctorLevel::Warn
-        };
-        checks.push(DoctorCheck {
-            level,
-            message: format!("command check: {cmd}"),
-        });
+    // Check git availability
+    let git_level = if run_command_capture("git", &["--version".to_string()]).is_ok() {
+        DoctorLevel::Ok
+    } else {
+        DoctorLevel::Warn
+    };
+    checks.push(DoctorCheck {
+        level: git_level,
+        message: "command check: git".to_string(),
+    });
+
+    // Check all editor commands from registry
+    for (name, config) in registry.all_editors() {
+        if let Some(cmd_str) = config.command.first() {
+            let level = if run_command_capture(cmd_str, &["--version".to_string()]).is_ok() {
+                DoctorLevel::Ok
+            } else {
+                DoctorLevel::Warn
+            };
+            checks.push(DoctorCheck {
+                level,
+                message: format!("editor check: {} ({})", name, cmd_str),
+            });
+        }
     }
 
     Ok(DoctorReport { checks })

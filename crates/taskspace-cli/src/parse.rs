@@ -1,7 +1,7 @@
-use taskspace_core::{EditorKind, RepoSpec, SessionName, TaskspaceError};
+use taskspace_core::{RepoSpec, SessionName, TaskspaceError};
 
+use crate::Commands;
 use crate::execute::CommandRequest;
-use crate::{CliEditor, Commands};
 
 pub fn parse_command(command: Commands) -> Result<CommandRequest, TaskspaceError> {
     match command {
@@ -17,7 +17,7 @@ pub fn parse_command(command: Commands) -> Result<CommandRequest, TaskspaceError
                 .map(|raw| RepoSpec::parse(raw))
                 .collect::<Result<Vec<_>, _>>()?,
             open_after_create: open,
-            editor: editor.into(),
+            editor,
         }),
         Commands::Open { name, editor, last } => {
             if name.is_some() && last {
@@ -28,7 +28,7 @@ pub fn parse_command(command: Commands) -> Result<CommandRequest, TaskspaceError
             let parsed_name = name.as_deref().map(SessionName::parse).transpose()?;
             Ok(CommandRequest::Open {
                 name: parsed_name,
-                editor: editor.into(),
+                editor,
             })
         }
         Commands::List => Ok(CommandRequest::List),
@@ -41,14 +41,5 @@ pub fn parse_command(command: Commands) -> Result<CommandRequest, TaskspaceError
             name: SessionName::parse(&name)?,
         }),
         Commands::Doctor => Ok(CommandRequest::Doctor),
-    }
-}
-
-impl From<CliEditor> for EditorKind {
-    fn from(value: CliEditor) -> Self {
-        match value {
-            CliEditor::Opencode => EditorKind::Opencode,
-            CliEditor::Code => EditorKind::Code,
-        }
     }
 }

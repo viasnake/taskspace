@@ -1,26 +1,10 @@
-use std::fmt;
+pub mod editor;
 
-use serde::{Deserialize, Serialize};
+pub use editor::{EditorConfig, PlaceholderContext, default_editors, expand_placeholders};
+
 use thiserror::Error;
 
 pub const WORKSPACE_SCHEMA_VERSION: u32 = 1;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum EditorKind {
-    #[default]
-    Opencode,
-    Code,
-}
-
-impl fmt::Display for EditorKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Opencode => write!(f, "opencode"),
-            Self::Code => write!(f, "code"),
-        }
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionName(String);
@@ -135,12 +119,6 @@ mod tests {
         let spec = RepoSpec::parse("app=https://example.com/app.git").expect("valid repo spec");
         assert_eq!(spec.name, "app");
         assert_eq!(spec.source, "https://example.com/app.git");
-    }
-
-    #[test]
-    fn editor_kind_display_and_default() {
-        assert_eq!(EditorKind::default().to_string(), "opencode");
-        assert_eq!(EditorKind::Code.to_string(), "code");
     }
 
     #[test]

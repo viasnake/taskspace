@@ -1,3 +1,4 @@
+mod config;
 mod doctor;
 mod paths;
 mod repo_import;
@@ -11,7 +12,9 @@ use std::time::SystemTime;
 
 use anyhow::{Result, anyhow};
 use chrono::Utc;
-use taskspace_core::{EditorKind, RepoSpec, SessionName, TaskspaceError};
+use taskspace_core::{
+    EditorConfig, PlaceholderContext, RepoSpec, SessionName, TaskspaceError, expand_placeholders,
+};
 use taskspace_infra_fs::{
     create_dir, list_directories, list_directories_with_modified, move_dir, remove_dir_all,
     run_command,
@@ -20,6 +23,7 @@ use taskspace_infra_fs::{
 #[derive(Debug, Clone)]
 pub struct TaskspaceApp {
     root_dir: PathBuf,
+    editor_registry: config::EditorRegistry,
 }
 
 #[derive(Debug, Clone)]
@@ -27,13 +31,13 @@ pub struct NewSessionRequest {
     pub name: SessionName,
     pub repos: Vec<RepoSpec>,
     pub open_after_create: bool,
-    pub editor: EditorKind,
+    pub editor: String,
 }
 
 #[derive(Debug, Clone)]
 pub struct OpenSessionRequest {
     pub target: OpenSessionTarget,
-    pub editor: EditorKind,
+    pub editor: String,
 }
 
 #[derive(Debug, Clone)]
@@ -78,7 +82,11 @@ impl TaskspaceApp {
             Some(path) => path,
             None => paths::default_sessions_root()?,
         };
-        Ok(Self { root_dir: resolved })
+        let editor_registry = config::EditorRegistry::load()?;
+        Ok(Self {
+            root_dir: resolved,
+            editor_registry,
+        })
     }
 
     pub fn root_dir(&self) -> &Path {
@@ -143,17 +151,18 @@ impl TaskspaceApp {
             ))));
         }
 
-        let target = match request.editor {
-            EditorKind::Code => session_dir.join("workspace.code-workspace"),
-            EditorKind::Opencode => session_dir,
-        };
-        let arg = vec![target.display().to_string()];
-        let command = match request.editor {
-            EditorKind::Code => "code",
-            EditorKind::Opencode => "opencode",
-        };
+        let editor_config = self.editor_registry.get(&request.editor).ok_or_else(|| {
+            anyhow!(TaskspaceError::Usage(format!(
+                "unknown editor: '{}'. Available editors: {}",
+                request.editor,
+                self.editor_registry
+                    .editor_names()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )))
+        })?;
 
-        run_command(command, &arg).map_err(|err| {
+        launch_editor(editor_config, &session_dir).map_err(|err| {
             anyhow!(TaskspaceError::ExternalCommand(format!(
                 "failed to open session '{}': {err}",
                 session_name.as_str()
@@ -162,7 +171,7 @@ impl TaskspaceApp {
     }
 
     pub fn doctor(&self) -> Result<DoctorReport> {
-        doctor::run(self)
+        doctor::run(self, &self.editor_registry)
     }
 
     pub fn archive_session(&self, request: ArchiveSessionRequest) -> Result<PathBuf> {
@@ -239,6 +248,13 @@ impl TaskspaceApp {
     }
 }
 
+/// Launches an editor with the given configuration.
+fn launch_editor(config: &EditorConfig, session_dir: &Path) -> Result<()> {
+    let context = PlaceholderContext::new(session_dir);
+    let expanded_cmd = expand_placeholders(&config.command, &context);
+    run_command(&expanded_cmd[0], &expanded_cmd[1..])
+}
+
 pub(crate) fn map_infra_error(err: anyhow::Error) -> anyhow::Error {
     anyhow!(TaskspaceError::Io(err.to_string()))
 }
@@ -258,7 +274,7 @@ mod tests {
             name: SessionName::parse("demo").expect("name"),
             repos: vec![],
             open_after_create: false,
-            editor: EditorKind::Opencode,
+            editor: "opencode".to_string(),
         })
         .expect("session creation");
 
@@ -275,7 +291,7 @@ mod tests {
             name: SessionName::parse("demo").expect("name"),
             repos: vec![],
             open_after_create: false,
-            editor: EditorKind::Opencode,
+            editor: "opencode".to_string(),
         })
         .expect("create");
 
@@ -298,7 +314,7 @@ mod tests {
             name: SessionName::parse("demo").expect("name"),
             repos: vec![],
             open_after_create: false,
-            editor: EditorKind::Opencode,
+            editor: "opencode".to_string(),
         })
         .expect("session creation");
 
@@ -334,7 +350,7 @@ mod tests {
         let err = app
             .open_session(OpenSessionRequest {
                 target: OpenSessionTarget::Last,
-                editor: EditorKind::Opencode,
+                editor: "opencode".to_string(),
             })
             .expect_err("open last without sessions should fail");
         assert!(format!("{err}").contains("no session specified and no recent session found"));

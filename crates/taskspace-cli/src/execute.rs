@@ -4,7 +4,7 @@ use taskspace_app::{
     ArchiveSessionRequest, DoctorReport, NewSessionRequest, OpenSessionRequest, OpenSessionTarget,
     RemoveSessionRequest, TaskspaceApp,
 };
-use taskspace_core::{EditorKind, RepoSpec, SessionName, TaskspaceError};
+use taskspace_core::{RepoSpec, SessionName, TaskspaceError};
 
 #[derive(Debug, Clone)]
 pub enum CommandRequest {
@@ -12,11 +12,11 @@ pub enum CommandRequest {
         name: SessionName,
         repos: Vec<RepoSpec>,
         open_after_create: bool,
-        editor: EditorKind,
+        editor: String,
     },
     Open {
         name: Option<SessionName>,
-        editor: EditorKind,
+        editor: String,
     },
     List,
     Remove {

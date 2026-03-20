@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::error::ErrorKind;
-use clap::{ArgAction, Parser, Subcommand, ValueEnum};
+use clap::{ArgAction, Parser, Subcommand};
 use taskspace_app::TaskspaceApp;
 use taskspace_core::TaskspaceError;
 
@@ -40,13 +40,13 @@ pub(crate) enum Commands {
         repos: Vec<String>,
         #[arg(long)]
         open: bool,
-        #[arg(long, value_enum, default_value_t = CliEditor::Opencode)]
-        editor: CliEditor,
+        #[arg(long, default_value = "opencode")]
+        editor: String,
     },
     Open {
         name: Option<String>,
-        #[arg(long, value_enum, default_value_t = CliEditor::Opencode)]
-        editor: CliEditor,
+        #[arg(long, default_value = "opencode")]
+        editor: String,
         #[arg(long)]
         last: bool,
     },
@@ -64,12 +64,6 @@ pub(crate) enum Commands {
         name: String,
     },
     Doctor,
-}
-
-#[derive(Debug, Clone, Copy, ValueEnum)]
-pub(crate) enum CliEditor {
-    Opencode,
-    Code,
 }
 
 #[cfg(not(test))]
@@ -239,6 +233,67 @@ mod tests {
         let err = run_with_args(["taskspace", "open", "demo", "--last"])
             .expect_err("name and --last should conflict");
         assert!(matches!(err, TaskspaceError::Usage(_)));
+    }
+
+    #[test]
+    fn new_with_default_editors() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path().to_path_buf();
+
+        // Test all default editor variants can be specified
+        for editor in ["opencode", "codex", "claude"] {
+            let name = format!("test-{}", editor);
+            let out = run_with_args([
+                "taskspace",
+                "--root",
+                root.to_str().expect("utf8"),
+                "new",
+                &name,
+                "--editor",
+                editor,
+            ])
+            .unwrap_or_else(|_| panic!("new with editor {} should succeed", editor));
+            assert!(
+                out[0].contains("created session"),
+                "editor {} should create session",
+                editor
+            );
+        }
+    }
+
+    #[test]
+    fn open_with_unknown_editor_fails_gracefully() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path().to_path_buf();
+
+        // Create a session first
+        run_with_args([
+            "taskspace",
+            "--root",
+            root.to_str().expect("utf8"),
+            "new",
+            "test-session",
+        ])
+        .expect("create test session");
+
+        // Test with a definitely non-existent editor
+        let err = run_with_args([
+            "taskspace",
+            "--root",
+            root.to_str().expect("utf8"),
+            "open",
+            "test-session",
+            "--editor",
+            "definitely-not-installed-editor-xyz",
+        ])
+        .expect_err("open with unknown editor should fail");
+
+        // Should fail with usage error (unknown editor)
+        assert!(
+            format!("{err}").contains("unknown editor"),
+            "should give unknown editor error, got: {}",
+            err
+        );
     }
 
     #[test]
