@@ -1,0 +1,20 @@
+[package]
+name = "taskspace-app"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+home.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+url.workspace = true
+taskspace-core = { path = "../taskspace-core" }
+taskspace-infra-fs = { path = "../taskspace-infra-fs" }
+
+[dev-dependencies]
+tempfile = "3.27.0"

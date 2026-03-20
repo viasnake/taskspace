@@ -1,0 +1,10 @@
+[package]
+name = "taskspace-core"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true

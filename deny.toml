@@ -1,0 +1,34 @@
+# cargo-deny policy for taskspace.
+#
+# Purpose:
+# - block vulnerable dependencies (`advisories`)
+# - block untrusted sources (`sources`)
+# - monitor dependency duplication (`bans`)
+# - make license posture explicit for dependencies (`licenses`)
+#
+# This file controls third-party dependency policy only.
+# It does not define the license of taskspace itself.
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+
+[licenses]
+version = 2
+private = { ignore = true }
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "BSD-3-Clause",
+  "ISC",
+  "Unicode-3.0",
+]
+
+[bans]
+multiple-versions = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

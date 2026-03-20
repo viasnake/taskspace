@@ -1,0 +1,12 @@
+[package]
+name = "taskspace-infra-fs"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+
+[dev-dependencies]
+tempfile = "3.27.0"

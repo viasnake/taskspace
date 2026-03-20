@@ -1,0 +1,20 @@
+[package]
+name = "taskspace-cli"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "taskspace"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+taskspace-app = { path = "../taskspace-app" }
+taskspace-core = { path = "../taskspace-core" }
+
+[dev-dependencies]
+assert_cmd = "2.1.1"
+tempfile = "3.27.0"
