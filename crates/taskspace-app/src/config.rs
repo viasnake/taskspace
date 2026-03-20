@@ -73,7 +73,7 @@ pub fn config_file_path() -> Option<PathBuf> {
     let config_home = std::env::var("XDG_CONFIG_HOME")
         .ok()
         .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|h| h.join(".config")))?;
+        .or_else(|| home::home_dir().map(|h| h.join(".config")))?;
 
     Some(config_home.join("taskspace").join("config.toml"))
 }
