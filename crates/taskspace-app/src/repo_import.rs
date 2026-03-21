@@ -10,6 +10,7 @@ use crate::template::Manifest;
 pub fn clone_manifest_projects(session_dir: &Path, manifest: &mut Manifest) -> Result<()> {
     for project in &mut manifest.projects {
         let target_dir = session_dir.join(&project.target);
+        let target_dir_text = target_dir.display().to_string();
         if target_dir.exists() {
             return Err(anyhow!(TaskspaceError::Conflict(format!(
                 "manifest target already exists: {}",
@@ -24,8 +25,9 @@ pub fn clone_manifest_projects(session_dir: &Path, manifest: &mut Manifest) -> R
         run_git(
             &[
                 "clone".to_string(),
+                "--".to_string(),
                 project.source.clone(),
-                target_dir.display().to_string(),
+                target_dir_text.clone(),
             ],
             &format!("failed to clone project '{}'", project.id),
         )?;
@@ -34,7 +36,7 @@ pub fn clone_manifest_projects(session_dir: &Path, manifest: &mut Manifest) -> R
             run_git(
                 &[
                     "-C".to_string(),
-                    target_dir.display().to_string(),
+                    target_dir_text.clone(),
                     "checkout".to_string(),
                     revision.clone(),
                 ],
@@ -48,7 +50,7 @@ pub fn clone_manifest_projects(session_dir: &Path, manifest: &mut Manifest) -> R
         let resolved_commit = run_git_capture(
             &[
                 "-C".to_string(),
-                target_dir.display().to_string(),
+                target_dir_text,
                 "rev-parse".to_string(),
                 "HEAD".to_string(),
             ],

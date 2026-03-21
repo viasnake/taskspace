@@ -120,15 +120,6 @@ fn resolve_workspace_model_from_template(
         }
     }
 
-    if let Some(manifest) = &parsed.manifest
-        && manifest.projects.is_empty()
-    {
-        return Err(anyhow!(TaskspaceError::Usage(format!(
-            "invalid template manifest: {}",
-            "manifest.projects must not be empty"
-        ))));
-    }
-
     let layout_version = parsed
         .defaults
         .as_ref()
@@ -194,6 +185,12 @@ pub fn manifest_validation_errors(manifest: &Manifest) -> Vec<String> {
                 project.id
             ));
         }
+        if project.source.starts_with('-') {
+            errors.push(format!(
+                "manifest project '{}' source cannot start with '-': {}",
+                project.id, project.source
+            ));
+        }
         if !is_allowed_source(&project.source) {
             errors.push(format!(
                 "manifest project '{}' has unsupported source: {}",
@@ -257,18 +254,57 @@ fn is_allowed_source(source: &str) -> bool {
         return false;
     }
 
-    if trimmed.starts_with("https://")
-        || trimmed.starts_with("ssh://")
-        || trimmed.starts_with("file://")
-    {
-        return true;
+    if let Some((scheme, _)) = trimmed.split_once("://") {
+        return matches!(scheme, "https" | "ssh");
     }
 
+    // SCP-like remote syntax: git@github.com:org/repo.git
     if !trimmed.contains("://") && trimmed.contains('@') && trimmed.contains(':') {
         return true;
     }
 
+    // Local filesystem path (absolute or relative).
     Path::new(trimmed).components().count() > 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manifest_rejects_unsupported_source_scheme() {
+        let manifest = Manifest {
+            projects: vec![ManifestProject {
+                id: "app".to_string(),
+                source: "http://example.com/repo.git".to_string(),
+                revision: None,
+                target: "repos/app".to_string(),
+                resolved_commit: None,
+            }],
+        };
+
+        let errors = manifest_validation_errors(&manifest);
+        assert!(
+            errors.iter().any(|msg| msg.contains("unsupported source")),
+            "expected unsupported source error, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn manifest_accepts_local_source_path() {
+        let manifest = Manifest {
+            projects: vec![ManifestProject {
+                id: "app".to_string(),
+                source: "../seed-repo".to_string(),
+                revision: Some("main".to_string()),
+                target: "repos/app".to_string(),
+                resolved_commit: None,
+            }],
+        };
+
+        let errors = manifest_validation_errors(&manifest);
+        assert!(errors.is_empty(), "expected no errors, got: {errors:?}");
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

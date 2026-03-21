@@ -1,4 +1,4 @@
-use std::path::{Component, Path};
+use std::path::Path;
 
 use anyhow::{Result, anyhow};
 use taskspace_core::{TaskspaceError, WORKSPACE_SCHEMA_VERSION};
@@ -46,17 +46,6 @@ pub fn validate_workspace_yaml(path: &Path, expected_session_name: &str) -> Resu
                 "invalid manifest: {}",
                 manifest_errors.join("; ")
             ))));
-        }
-    }
-
-    if let Some(snapshot) = &parsed.manifest {
-        for project in &snapshot.projects {
-            if !is_safe_relative_path(&project.target) {
-                return Err(anyhow!(TaskspaceError::Corrupt(format!(
-                    "manifest project '{}' has invalid target path: {}",
-                    project.id, project.target
-                ))));
-            }
         }
     }
 
@@ -134,14 +123,4 @@ pub fn ensure_session_marker(session_dir: &Path) -> Result<()> {
     }
 
     Ok(())
-}
-
-fn is_safe_relative_path(raw: &str) -> bool {
-    let path = Path::new(raw);
-    if path.is_absolute() {
-        return false;
-    }
-    !path
-        .components()
-        .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
 }

@@ -284,6 +284,7 @@ mise run check
 
 ## 📌 Requirements
 
+* Git
 * OpenCode (or compatible AI CLI)
 * VS Code (optional)
 
