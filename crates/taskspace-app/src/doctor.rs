@@ -6,6 +6,7 @@ use taskspace_infra_fs::run_command_capture;
 use crate::config::EditorRegistry;
 use crate::paths::{archive_root, global_skills_paths};
 use crate::spec;
+use crate::template::WorkspaceModel;
 use crate::validation::{validate_opencode_config, validate_workspace_yaml};
 use crate::{DoctorCategory, DoctorCheck, DoctorLevel, DoctorReport, TaskspaceApp};
 
@@ -69,18 +70,6 @@ pub fn run(app: &TaskspaceApp, registry: &EditorRegistry) -> Result<DoctorReport
             ),
         });
     }
-
-    // Check git availability
-    let git_level = if command_is_available("git") {
-        DoctorLevel::Ok
-    } else {
-        DoctorLevel::Warn
-    };
-    checks.push(DoctorCheck {
-        category: DoctorCategory::Command,
-        level: git_level,
-        message: "command check: git".to_string(),
-    });
 
     // Check all editor commands from registry
     for (name, cmd) in editor_commands_for_check(registry) {
@@ -147,20 +136,28 @@ fn check_session(name: &str, session_dir: &Path) -> Vec<DoctorCheck> {
         message: format!("session '{}' structure looks valid", name),
     });
 
-    checks.push(
-        match validate_workspace_yaml(&session_dir.join("workspace.yaml")) {
-            Ok(()) => DoctorCheck {
+    let workspace = match validate_workspace_yaml(&session_dir.join("workspace.yaml"), name) {
+        Ok(workspace) => {
+            checks.push(DoctorCheck {
                 category: DoctorCategory::Session,
                 level: DoctorLevel::Ok,
                 message: format!("session '{}' workspace.yaml is valid", name),
-            },
-            Err(err) => DoctorCheck {
+            });
+            Some(workspace)
+        }
+        Err(err) => {
+            checks.push(DoctorCheck {
                 category: DoctorCategory::Session,
                 level: DoctorLevel::Fail,
                 message: format!("session '{}' workspace.yaml invalid: {err}", name),
-            },
-        },
-    );
+            });
+            None
+        }
+    };
+
+    if let Some(workspace) = workspace {
+        checks.extend(check_template_metadata(name, session_dir, &workspace));
+    }
 
     checks.push(
         match validate_opencode_config(&session_dir.join(".opencode/opencode.jsonc")) {
@@ -176,6 +173,90 @@ fn check_session(name: &str, session_dir: &Path) -> Vec<DoctorCheck> {
             },
         },
     );
+
+    checks
+}
+
+fn check_template_metadata(
+    name: &str,
+    session_dir: &Path,
+    workspace: &WorkspaceModel,
+) -> Vec<DoctorCheck> {
+    let mut checks = Vec::new();
+
+    if let Some(template) = &workspace.template
+        && !Path::new(&template.ref_path).exists()
+    {
+        checks.push(DoctorCheck {
+            category: DoctorCategory::Session,
+            level: DoctorLevel::Warn,
+            message: format!(
+                "session '{}' template reference does not exist: {}",
+                name, template.ref_path
+            ),
+        });
+    }
+
+    if let Some(manifest) = &workspace.manifest {
+        let missing = manifest
+            .projects
+            .iter()
+            .filter(|project| !session_dir.join(&project.target).exists())
+            .map(|project| format!("{} -> {}", project.id, project.target))
+            .collect::<Vec<_>>();
+
+        if !missing.is_empty() {
+            checks.push(DoctorCheck {
+                category: DoctorCategory::Session,
+                level: DoctorLevel::Warn,
+                message: format!(
+                    "session '{}' manifest targets are missing: {}",
+                    name,
+                    missing.join(", ")
+                ),
+            });
+        }
+
+        for project in &manifest.projects {
+            let project_path = session_dir.join(&project.target);
+            if !project_path.exists() {
+                continue;
+            }
+
+            let args = vec![
+                "-C".to_string(),
+                project_path.display().to_string(),
+                "rev-parse".to_string(),
+                "HEAD".to_string(),
+            ];
+            match run_command_capture("git", &args) {
+                Ok(current) => {
+                    if let Some(expected) = &project.resolved_commit
+                        && expected != &current
+                    {
+                        checks.push(DoctorCheck {
+                            category: DoctorCategory::Session,
+                            level: DoctorLevel::Warn,
+                            message: format!(
+                                "session '{}' manifest project '{}' HEAD differs (expected {}, got {})",
+                                name, project.id, expected, current
+                            ),
+                        });
+                    }
+                }
+                Err(err) => {
+                    checks.push(DoctorCheck {
+                        category: DoctorCategory::Session,
+                        level: DoctorLevel::Warn,
+                        message: format!(
+                            "session '{}' manifest project '{}' is not a readable git repository: {}",
+                            name, project.id, err
+                        ),
+                    });
+                }
+            }
+        }
+    }
 
     checks
 }

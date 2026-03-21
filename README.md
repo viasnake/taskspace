@@ -2,12 +2,12 @@
 
 **taskspace** is a session-oriented workspace manager for AI coding.
 
-It creates an isolated workspace per task, combining multiple repositories and AI context files into a single working environment.
+It creates an isolated workspace per task, combining project files and AI context files into a single working environment.
 
 ## ✨ Features
 
 * **Session-based workflow** (1 task = 1 workspace)
-* **Multi-repository support**
+* **Session reproducibility metadata**
 * **Non-commit AI context layer** (`MEMORY`, `PLAN`, etc.)
 * **Global AI skill definition (`SKILL.md`)**
 * **Editor integration (OpenCode / VS Code)**
@@ -57,7 +57,7 @@ A unit of work (e.g., bug fix, feature, investigation)
 
 A directory containing:
 
-* repositories
+* project files
 * context files
 * AI configuration
 
@@ -88,7 +88,7 @@ This file teaches the AI:
 
 * how to work inside a session
 * how to update context files
-* how to coordinate multi-repo work
+* how to coordinate workspace work
 * how to operate safely
 
 The `SKILL.md` in this repository is the template you can copy or adapt for your editor's skill directory.
@@ -133,7 +133,7 @@ Once installed, the skill nudges the AI to:
 * create a new session for new work instead of editing random repositories directly
 * reopen an existing session instead of duplicating workspaces
 * keep planning, decisions, and memory in `context/`
-* treat each `repos/<repo>` directory as an independent repository
+* treat `repos/` as a workspace area for project checkouts you manage
 * prefer `archive` over destructive cleanup
 * run `taskspace doctor` when workspace state looks wrong
 
@@ -157,8 +157,6 @@ If your editor supports both a global skill directory and a repository-local one
     AGENTS.md
     workspace.yaml
 
-    workspace.code-workspace
-
     .opencode/
       opencode.jsonc
 
@@ -174,11 +172,21 @@ If your editor supports both a global skill directory and a repository-local one
 ### Create a session
 
 ```bash
-taskspace new <name> \
-  --repo app=~/src/app \
-  --repo infra=~/src/infra \
-  --open
+taskspace new <name> --open
+taskspace new <name> --template ./session-template.yaml --open
 ```
+
+Template examples:
+
+```bash
+taskspace new demo --template ./examples/template-minimal.yaml
+taskspace new demo --template ./examples/template-monorepo.yaml
+```
+
+When a template contains `manifest.projects`, `taskspace new --template ...` clones those repositories into the session.
+Each cloned project records its resolved commit in `workspace.yaml` for reproducibility.
+
+`workspace.yaml` stores session reproducibility metadata (schema version, template reference, and manifest).
 
 ### Open a session
 
@@ -252,9 +260,10 @@ A typical taskspace-aware AI setup reads:
 
 1. Install `SKILL.md` into your editor's global or repository-local skill directory.
 2. Run `taskspace new <name> --open` for new work.
-3. Let the AI operate inside the created session workspace.
-4. Keep cross-repo intent in `context/PLAN.md` and durable decisions in `context/DECISIONS.md`.
-5. Archive completed sessions unless you explicitly want deletion.
+3. If you have a local session template, run `taskspace new <name> --template <path>`.
+4. Let the AI operate inside the created session workspace.
+5. Keep workspace intent in `context/PLAN.md` and durable decisions in `context/DECISIONS.md`.
+6. Archive completed sessions unless you explicitly want deletion.
 
 ## 🔒 Safety
 
@@ -275,7 +284,6 @@ mise run check
 
 ## 📌 Requirements
 
-* Git
 * OpenCode (or compatible AI CLI)
 * VS Code (optional)
 
@@ -285,7 +293,7 @@ mise run check
 
 taskspace treats:
 
-* repositories
+* project files
 * notes
 * AI context
 
@@ -298,10 +306,7 @@ TBD
 ## 💡 Example
 
 ```bash
-taskspace new auth-fix \
-  --repo app=~/src/app \
-  --repo infra=~/src/infra \
-  --open
+taskspace new auth-fix --open
 ```
 
 Start coding immediately with full AI context.

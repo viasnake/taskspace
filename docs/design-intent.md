@@ -3,14 +3,15 @@
 ## What this tool is
 
 taskspace is a session-oriented workspace manager for AI coding.
-It creates one isolated workspace for one task, with repository files and AI context files in one place.
+It creates one isolated workspace for one task, with project files and AI context files in one place.
 
 ## What v1 must guarantee
 
 - One task maps to one session directory.
 - AI context files are separated from repository content.
-- Multi-repository work is possible in one session.
+- One session structure can be recreated consistently.
 - `taskspace new --open` starts work immediately.
+- `taskspace new --template <local-yaml>` can clone manifest projects and persist reproducibility metadata.
 - The behavior is agent-agnostic (OpenCode, Claude Code, Gemini CLI, etc.).
 
 ## What v1 intentionally excludes
@@ -26,7 +27,8 @@ It creates one isolated workspace for one task, with repository files and AI con
 - `~/taskspace/<session>` is the active work area (session directories are directly under the taskspace root).
 - `~/taskspace/.archive/` stores archived sessions to keep deletion reversible by default.
 - `context/` stores ephemeral AI notes (`MEMORY`, `PLAN`, `CONSTRAINTS`, `DECISIONS`, `LINKS`).
-- `repos/` stores cloned repositories for this session only.
+- `repos/` is a workspace area for project checkouts created from template manifest entries.
+- `workspace.yaml` stores reproducibility metadata (template reference, manifest).
 
 ## Safety and operational rules
 
@@ -34,7 +36,7 @@ It creates one isolated workspace for one task, with repository files and AI con
 - `rm --dry-run` lets users verify targets without deletion.
 - `open` without a name opens the latest session by directory modified time.
 - External commands are executed with argument lists (not shell strings).
-- Session and repo names are validated before file operations.
+- Session names are validated before file operations.
 - `doctor` checks structure, metadata, and command availability.
 
 ## Stable contracts
@@ -42,7 +44,7 @@ It creates one isolated workspace for one task, with repository files and AI con
 - CLI commands are stable: `new`, `open`, `list`, `rm`, `archive`, `doctor`.
 - Command aliases are supported: `remove` for `rm`, `ls` for `list`.
 - Version flags are supported: `-v`, `-V`, `--version`.
-- `workspace.yaml` includes a schema `version`.
+- `workspace.yaml` includes session metadata with a schema `version`.
 - Exit codes are mapped by error category.
 
 ## Implementation boundaries
@@ -54,5 +56,5 @@ It creates one isolated workspace for one task, with repository files and AI con
 
 ## Change policy
 
-When behavior changes, keep backward compatibility for existing sessions.
-If compatibility cannot be preserved, increment schema version and add explicit migration logic.
+This v1 rewrite intentionally resets session schema compatibility.
+Future schema changes should increment version and provide explicit migration guidance.

@@ -13,7 +13,7 @@ use std::time::SystemTime;
 use anyhow::{Result, anyhow};
 use chrono::Utc;
 use taskspace_core::{
-    EditorConfig, PlaceholderContext, RepoSpec, SessionName, TaskspaceError, expand_placeholders,
+    EditorConfig, PlaceholderContext, SessionName, TaskspaceError, expand_placeholders,
 };
 use taskspace_infra_fs::{
     create_dir, list_directories, list_directories_with_modified, move_dir, remove_dir_all,
@@ -29,7 +29,7 @@ pub struct TaskspaceApp {
 #[derive(Debug, Clone)]
 pub struct NewSessionRequest {
     pub name: SessionName,
-    pub repos: Vec<RepoSpec>,
+    pub template_path: Option<PathBuf>,
     pub open_after_create: bool,
     pub editor: String,
 }
@@ -116,8 +116,14 @@ impl TaskspaceApp {
         create_dir(&session_dir).map_err(map_infra_error)?;
         if let Err(err) = (|| -> Result<()> {
             template::create_base_structure(&session_dir)?;
-            template::write_templates(&session_dir, request.name.as_str(), &request.repos)?;
-            repo_import::import_repos(&session_dir, &request.repos)?;
+            let mut workspace = template::resolve_workspace_model(
+                request.name.as_str(),
+                request.template_path.as_deref(),
+            )?;
+            if let Some(manifest) = &mut workspace.manifest {
+                repo_import::clone_manifest_projects(&session_dir, manifest)?;
+            }
+            template::write_templates(&session_dir, &workspace)?;
             Ok(())
         })() {
             if let Err(cleanup_err) = remove_dir_all(&session_dir).map_err(map_infra_error) {
@@ -305,6 +311,8 @@ pub(crate) fn map_infra_error(err: anyhow::Error) -> anyhow::Error {
 mod tests {
     use super::*;
     use std::fs;
+    use std::path::Path;
+    use std::process::Command;
     use tempfile::tempdir;
 
     #[test]
@@ -314,7 +322,7 @@ mod tests {
 
         app.create_session(NewSessionRequest {
             name: SessionName::parse("demo").expect("name"),
-            repos: vec![],
+            template_path: None,
             open_after_create: false,
             editor: "opencode".to_string(),
         })
@@ -325,13 +333,149 @@ mod tests {
     }
 
     #[test]
+    fn create_session_with_template_records_template_metadata() {
+        let temp = tempdir().expect("temp dir");
+        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
+        let repo = create_git_repo(temp.path(), "seed-repo");
+
+        let template_path = temp.path().join("template.yaml");
+        fs::write(
+            &template_path,
+            format!(
+                "version: 1\nmanifest:\n  projects:\n    - id: app\n      source: {}\n      revision: main\n      target: repos/app\n",
+                repo.display()
+            ),
+        )
+        .expect("write template");
+
+        app.create_session(NewSessionRequest {
+            name: SessionName::parse("demo").expect("name"),
+            template_path: Some(template_path.clone()),
+            open_after_create: false,
+            editor: "opencode".to_string(),
+        })
+        .expect("session creation");
+
+        let yaml =
+            fs::read_to_string(temp.path().join("demo/workspace.yaml")).expect("workspace yaml");
+        let value: serde_yaml::Value = serde_yaml::from_str(&yaml).expect("valid yaml");
+
+        assert_eq!(value["version"].as_u64(), Some(3));
+        assert_eq!(value["created_by"].as_str(), Some("template"));
+        let expected_ref = path_to_string(&template_path);
+        assert_eq!(
+            value["template"]["ref"].as_str(),
+            Some(expected_ref.as_str())
+        );
+        assert!(
+            value["template"]["digest"]
+                .as_str()
+                .expect("digest")
+                .starts_with("sha256:")
+        );
+        assert_eq!(value["manifest"]["projects"][0]["id"].as_str(), Some("app"));
+        assert!(
+            value["manifest"]["projects"][0]["resolved_commit"]
+                .as_str()
+                .expect("resolved commit")
+                .len()
+                >= 40
+        );
+        assert!(temp.path().join("demo/repos/app/README.md").exists());
+    }
+
+    #[test]
+    fn create_session_fails_for_invalid_template_and_rolls_back() {
+        let temp = tempdir().expect("temp dir");
+        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
+
+        let template_path = temp.path().join("invalid-template.yaml");
+        fs::write(&template_path, "version: 99\n").expect("write template");
+
+        let err = app
+            .create_session(NewSessionRequest {
+                name: SessionName::parse("demo").expect("name"),
+                template_path: Some(template_path),
+                open_after_create: false,
+                editor: "opencode".to_string(),
+            })
+            .expect_err("invalid template should fail");
+
+        assert!(format!("{err}").contains("unsupported template schema version"));
+        assert!(!temp.path().join("demo").exists());
+    }
+
+    #[test]
+    fn create_session_rolls_back_when_clone_fails() {
+        let temp = tempdir().expect("temp dir");
+        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
+
+        let missing_repo = temp.path().join("does-not-exist");
+        let template_path = temp.path().join("template.yaml");
+        fs::write(
+            &template_path,
+            format!(
+                "version: 1\nmanifest:\n  projects:\n    - id: bad\n      source: {}\n      target: repos/bad\n",
+                missing_repo.display()
+            ),
+        )
+        .expect("write template");
+
+        let err = app
+            .create_session(NewSessionRequest {
+                name: SessionName::parse("demo").expect("name"),
+                template_path: Some(template_path),
+                open_after_create: false,
+                editor: "opencode".to_string(),
+            })
+            .expect_err("clone failure should rollback");
+
+        assert!(format!("{err}").contains("failed to clone project"));
+        assert!(!temp.path().join("demo").exists());
+    }
+
+    fn path_to_string(path: &Path) -> String {
+        path.display().to_string()
+    }
+
+    fn create_git_repo(base: &Path, name: &str) -> std::path::PathBuf {
+        let repo = base.join(name);
+        fs::create_dir_all(&repo).expect("create repo dir");
+        run_git(&repo, &["init", "-b", "main"]);
+        fs::write(repo.join("README.md"), "seed repo\n").expect("write readme");
+        run_git(&repo, &["add", "README.md"]);
+        run_git(
+            &repo,
+            &[
+                "-c",
+                "user.name=taskspace",
+                "-c",
+                "user.email=taskspace@example.com",
+                "commit",
+                "-m",
+                "initial",
+            ],
+        );
+        repo
+    }
+
+    fn run_git(repo: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git command failed: {:?}", args);
+    }
+
+    #[test]
     fn doctor_fails_when_required_file_missing() {
         let temp = tempdir().expect("temp dir");
         let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
 
         app.create_session(NewSessionRequest {
             name: SessionName::parse("demo").expect("name"),
-            repos: vec![],
+            template_path: None,
             open_after_create: false,
             editor: "opencode".to_string(),
         })
@@ -354,7 +498,7 @@ mod tests {
 
         app.create_session(NewSessionRequest {
             name: SessionName::parse("demo").expect("name"),
-            repos: vec![],
+            template_path: None,
             open_after_create: false,
             editor: "opencode".to_string(),
         })
@@ -406,7 +550,7 @@ mod tests {
         let err = app
             .create_session(NewSessionRequest {
                 name: SessionName::parse("demo").expect("name"),
-                repos: vec![],
+                template_path: None,
                 open_after_create: false,
                 editor: "definitely-not-an-editor".to_string(),
             })
@@ -423,7 +567,7 @@ mod tests {
 
         app.create_session(NewSessionRequest {
             name: SessionName::parse("demo").expect("name"),
-            repos: vec![],
+            template_path: None,
             open_after_create: false,
             editor: "opencode".to_string(),
         })

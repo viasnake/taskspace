@@ -2,12 +2,12 @@ pub const REQUIRED_SESSION_FILES: [&str; 9] = [
     "workspace.yaml",
     "SESSION.md",
     "AGENTS.md",
-    "workspace.code-workspace",
     "context/MEMORY.md",
     "context/PLAN.md",
     "context/CONSTRAINTS.md",
     "context/DECISIONS.md",
     "context/LINKS.md",
+    ".opencode/opencode.jsonc",
 ];
 
 pub const SESSION_MARKERS: [&str; 4] = [

@@ -37,8 +37,8 @@ struct Cli {
 pub(crate) enum Commands {
     New {
         name: String,
-        #[arg(long = "repo")]
-        repos: Vec<String>,
+        #[arg(long = "template")]
+        template: Option<String>,
         #[arg(long)]
         open: bool,
         #[arg(long, default_value = "opencode")]
@@ -189,6 +189,8 @@ mod tests {
     use super::*;
     use std::fs;
     use std::io::Cursor;
+    use std::path::Path;
+    use std::process::Command;
     use tempfile::tempdir;
 
     #[test]
@@ -311,6 +313,70 @@ mod tests {
                 editor
             );
         }
+    }
+
+    #[test]
+    fn new_with_template_path_succeeds() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path().to_path_buf();
+        let repo = create_git_repo(&root, "seed-repo");
+        let template_path = root.join("template.yaml");
+        fs::write(
+            &template_path,
+            format!(
+                "version: 1\nmanifest:\n  projects:\n    - id: app\n      source: {}\n      target: repos/app\n",
+                repo.display()
+            ),
+        )
+        .expect("write template");
+        let template_path_text = path_to_string(&template_path);
+
+        let out = run_with_args([
+            "taskspace",
+            "--root",
+            root.to_str().expect("utf8"),
+            "new",
+            "template-demo",
+            "--template",
+            template_path_text.as_str(),
+        ])
+        .expect("new with template should succeed");
+        assert!(out[0].contains("created session"));
+        assert!(root.join("template-demo/repos/app/.git").exists());
+    }
+
+    fn path_to_string(path: &Path) -> String {
+        path.display().to_string()
+    }
+
+    fn create_git_repo(base: &Path, name: &str) -> std::path::PathBuf {
+        let repo = base.join(name);
+        fs::create_dir_all(&repo).expect("create repo dir");
+        run_git(&repo, &["init", "-b", "main"]);
+        fs::write(repo.join("README.md"), "seed repo\n").expect("write readme");
+        run_git(&repo, &["add", "README.md"]);
+        run_git(
+            &repo,
+            &[
+                "-c",
+                "user.name=taskspace",
+                "-c",
+                "user.email=taskspace@example.com",
+                "commit",
+                "-m",
+                "initial",
+            ],
+        );
+        repo
+    }
+
+    fn run_git(repo: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git command failed: {:?}", args);
     }
 
     #[test]

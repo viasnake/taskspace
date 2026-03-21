@@ -1,52 +1,71 @@
 use std::path::Path;
 
 use anyhow::{Result, anyhow};
-use taskspace_core::{RepoSpec, TaskspaceError};
-use taskspace_infra_fs::{canonicalize_if_exists, run_command};
-use url::Url;
+use taskspace_core::TaskspaceError;
+use taskspace_infra_fs::{create_dir, run_command, run_command_capture};
 
-pub fn import_repos(session_dir: &Path, repos: &[RepoSpec]) -> Result<()> {
-    for repo in repos {
-        let dest = session_dir.join("repos").join(&repo.name);
-        let source = if let Some(path) = canonicalize_if_exists(&repo.source) {
-            path.display().to_string()
-        } else {
-            repo.source.clone()
-        };
+use crate::map_infra_error;
+use crate::template::Manifest;
 
-        if source.starts_with('-') {
-            return Err(anyhow!(TaskspaceError::Usage(format!(
-                "repo source for '{}' cannot start with '-'",
-                repo.name
+pub fn clone_manifest_projects(session_dir: &Path, manifest: &mut Manifest) -> Result<()> {
+    for project in &mut manifest.projects {
+        let target_dir = session_dir.join(&project.target);
+        if target_dir.exists() {
+            return Err(anyhow!(TaskspaceError::Conflict(format!(
+                "manifest target already exists: {}",
+                project.target
             ))));
         }
 
-        let args = vec![
-            "clone".to_string(),
-            "--".to_string(),
-            source,
-            dest.display().to_string(),
-        ];
-        if let Err(err) = run_command("git", &args) {
-            return Err(anyhow!(TaskspaceError::ExternalCommand(format!(
-                "failed to import repo '{}={}': {err}",
-                repo.name,
-                redact_source(&repo.source)
-            ))));
+        if let Some(parent) = target_dir.parent() {
+            create_dir(parent).map_err(map_infra_error)?;
         }
+
+        run_git(
+            &[
+                "clone".to_string(),
+                project.source.clone(),
+                target_dir.display().to_string(),
+            ],
+            &format!("failed to clone project '{}'", project.id),
+        )?;
+
+        if let Some(revision) = &project.revision {
+            run_git(
+                &[
+                    "-C".to_string(),
+                    target_dir.display().to_string(),
+                    "checkout".to_string(),
+                    revision.clone(),
+                ],
+                &format!(
+                    "failed to checkout revision '{}' for project '{}'",
+                    revision, project.id
+                ),
+            )?;
+        }
+
+        let resolved_commit = run_git_capture(
+            &[
+                "-C".to_string(),
+                target_dir.display().to_string(),
+                "rev-parse".to_string(),
+                "HEAD".to_string(),
+            ],
+            &format!("failed to resolve HEAD commit for project '{}'", project.id),
+        )?;
+        project.resolved_commit = Some(resolved_commit);
     }
 
     Ok(())
 }
 
-pub fn redact_source(raw: &str) -> String {
-    if let Ok(mut url) = Url::parse(raw) {
-        let _ = url.set_username("");
-        let _ = url.set_password(None);
-        url.set_query(None);
-        url.set_fragment(None);
-        return url.to_string();
-    }
+fn run_git(args: &[String], context: &str) -> Result<()> {
+    run_command("git", args)
+        .map_err(|err| anyhow!(TaskspaceError::ExternalCommand(format!("{context}: {err}"))))
+}
 
-    raw.to_string()
+fn run_git_capture(args: &[String], context: &str) -> Result<String> {
+    run_command_capture("git", args)
+        .map_err(|err| anyhow!(TaskspaceError::ExternalCommand(format!("{context}: {err}"))))
 }

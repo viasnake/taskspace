@@ -1,14 +1,14 @@
-use std::path::Path;
+use std::path::{Component, Path};
 
 use anyhow::{Result, anyhow};
-use serde::Deserialize;
 use taskspace_core::{TaskspaceError, WORKSPACE_SCHEMA_VERSION};
 use taskspace_infra_fs::read_file;
 
 use crate::map_infra_error;
 use crate::spec;
+use crate::template::{WorkspaceModel, manifest_validation_errors};
 
-pub fn validate_workspace_yaml(path: &Path) -> Result<()> {
+pub fn validate_workspace_yaml(path: &Path, expected_session_name: &str) -> Result<WorkspaceModel> {
     let content = read_file(path).map_err(map_infra_error)?;
     let parsed: WorkspaceModel = serde_yaml::from_str(&content)
         .map_err(|e| anyhow!(TaskspaceError::Corrupt(format!("invalid yaml: {e}"))))?;
@@ -26,7 +26,54 @@ pub fn validate_workspace_yaml(path: &Path) -> Result<()> {
         )));
     }
 
-    Ok(())
+    if parsed.name != expected_session_name {
+        return Err(anyhow!(TaskspaceError::Corrupt(format!(
+            "workspace name '{}' does not match session directory '{}'",
+            parsed.name, expected_session_name
+        ))));
+    }
+
+    if parsed.layout_version == 0 {
+        return Err(anyhow!(TaskspaceError::Corrupt(
+            "layout_version must be >= 1".to_string()
+        )));
+    }
+
+    if let Some(manifest) = &parsed.manifest {
+        let manifest_errors = manifest_validation_errors(manifest);
+        if !manifest_errors.is_empty() {
+            return Err(anyhow!(TaskspaceError::Corrupt(format!(
+                "invalid manifest: {}",
+                manifest_errors.join("; ")
+            ))));
+        }
+    }
+
+    if let Some(snapshot) = &parsed.manifest {
+        for project in &snapshot.projects {
+            if !is_safe_relative_path(&project.target) {
+                return Err(anyhow!(TaskspaceError::Corrupt(format!(
+                    "manifest project '{}' has invalid target path: {}",
+                    project.id, project.target
+                ))));
+            }
+        }
+    }
+
+    if let Some(template) = &parsed.template {
+        if template.ref_path.trim().is_empty() {
+            return Err(anyhow!(TaskspaceError::Corrupt(
+                "template.ref must not be empty".to_string()
+            )));
+        }
+        if !template.digest.starts_with("sha256:") || template.digest.len() <= 7 {
+            return Err(anyhow!(TaskspaceError::Corrupt(
+                "template.digest must be in format 'sha256:<hex>'".to_string()
+            )));
+        }
+    }
+
+    Ok(parsed)
 }
 
 pub fn validate_opencode_config(path: &Path) -> Result<()> {
@@ -89,8 +136,12 @@ pub fn ensure_session_marker(session_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-#[derive(Deserialize)]
-struct WorkspaceModel {
-    version: u32,
-    name: String,
+fn is_safe_relative_path(raw: &str) -> bool {
+    let path = Path::new(raw);
+    if path.is_absolute() {
+        return false;
+    }
+    !path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
 }

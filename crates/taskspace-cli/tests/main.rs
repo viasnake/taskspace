@@ -207,7 +207,7 @@ fn binary_open_without_name_uses_latest_session() {
         .success();
 
     let called = fs::read_to_string(&marker).expect("read marker");
-    // For Opencode editor, the session directory is passed (not workspace.code-workspace)
+    // For Opencode editor, the session directory is passed directly.
     // We verify that "new" session is opened (the latest one)
     assert!(
         called.contains("/new") || called.ends_with("new"),

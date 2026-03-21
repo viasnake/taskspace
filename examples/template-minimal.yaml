@@ -1,0 +1,7 @@
+version: 1
+manifest:
+  projects:
+    - id: app
+      source: git@github.com:example/app.git
+      revision: main
+      target: repos/app
