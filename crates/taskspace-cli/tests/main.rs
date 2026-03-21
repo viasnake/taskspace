@@ -24,6 +24,25 @@ fn binary_new_and_list_work() {
 }
 
 #[test]
+fn binary_new_with_unknown_editor_fails_fast() {
+    let temp = tempdir().expect("tempdir");
+    let root = temp.path().to_path_buf();
+
+    let mut cmd = Command::cargo_bin("taskspace").expect("binary");
+    cmd.arg("--root")
+        .arg(root.to_str().expect("utf8"))
+        .arg("new")
+        .arg("demo")
+        .arg("--editor")
+        .arg("definitely-not-installed-editor-xyz")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("unknown editor"));
+
+    assert!(!root.join("demo").exists());
+}
+
+#[test]
 fn binary_rm_with_yes_succeeds() {
     let temp = tempdir().expect("tempdir");
     let root = temp.path().to_path_buf();
@@ -76,7 +95,7 @@ fn binary_rm_without_yes_fails_even_with_stdin_input_in_non_interactive_mode() {
 }
 
 #[test]
-fn binary_rm_requires_yes_in_non_interactive_mode() {
+fn binary_rm_dry_run_succeeds_without_yes() {
     let temp = tempdir().expect("tempdir");
     let root = temp.path().to_path_buf();
 
@@ -95,9 +114,12 @@ fn binary_rm_requires_yes_in_non_interactive_mode() {
         .arg(root.to_str().expect("utf8"))
         .arg("rm")
         .arg("demo")
+        .arg("--dry-run")
         .assert()
-        .failure()
-        .stderr(predicates::str::contains("without --yes"));
+        .success()
+        .stdout(predicates::str::contains(
+            "dry-run: session 'demo' can be removed",
+        ));
 }
 
 #[test]

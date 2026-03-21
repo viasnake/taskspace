@@ -65,8 +65,16 @@ pub struct DoctorReport {
 
 #[derive(Debug, Clone)]
 pub struct DoctorCheck {
+    pub category: DoctorCategory,
     pub level: DoctorLevel,
     pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DoctorCategory {
+    Filesystem,
+    Session,
+    Command,
 }
 
 #[derive(Debug, Clone)]
@@ -94,6 +102,7 @@ impl TaskspaceApp {
     }
 
     pub fn create_session(&self, request: NewSessionRequest) -> Result<PathBuf> {
+        self.resolve_editor_config(&request.editor)?;
         create_dir(&self.root_dir).map_err(map_infra_error)?;
 
         let session_dir = self.root_dir.join(request.name.as_str());
@@ -130,7 +139,11 @@ impl TaskspaceApp {
     }
 
     pub fn list_sessions(&self) -> Result<Vec<String>> {
-        list_directories(&self.root_dir).map_err(map_infra_error)
+        let sessions = list_directories(&self.root_dir).map_err(map_infra_error)?;
+        Ok(sessions
+            .into_iter()
+            .filter(|name| is_visible_session_name(name))
+            .collect())
     }
 
     pub fn open_session(&self, request: OpenSessionRequest) -> Result<()> {
@@ -151,16 +164,7 @@ impl TaskspaceApp {
             ))));
         }
 
-        let editor_config = self.editor_registry.get(&request.editor).ok_or_else(|| {
-            anyhow!(TaskspaceError::Usage(format!(
-                "unknown editor: '{}'. Available editors: {}",
-                request.editor,
-                self.editor_registry
-                    .editor_names()
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )))
-        })?;
+        let editor_config = self.resolve_editor_config(&request.editor)?;
 
         launch_editor(editor_config, &session_dir).map_err(|err| {
             anyhow!(TaskspaceError::ExternalCommand(format!(
@@ -227,15 +231,29 @@ impl TaskspaceApp {
 }
 
 impl TaskspaceApp {
+    fn resolve_editor_config(&self, editor: &str) -> Result<&EditorConfig> {
+        self.editor_registry.get(editor).ok_or_else(|| {
+            anyhow!(TaskspaceError::Usage(format!(
+                "unknown editor: '{}'. Available editors: {}",
+                editor,
+                self.available_editor_names().join(", ")
+            )))
+        })
+    }
+
+    fn available_editor_names(&self) -> Vec<&str> {
+        let mut names = self.editor_registry.editor_names().collect::<Vec<_>>();
+        names.sort_unstable();
+        names
+    }
+
     fn find_latest_session_name(&self) -> Result<Option<SessionName>> {
         let mut sessions: Vec<(SessionName, SystemTime)> =
             list_directories_with_modified(&self.root_dir)
                 .map_err(map_infra_error)?
                 .into_iter()
                 .filter_map(|entry| {
-                    SessionName::parse(&entry.name)
-                        .ok()
-                        .map(|name| (name, entry.modified))
+                    parse_visible_session_name(&entry.name).map(|name| (name, entry.modified))
                 })
                 .collect();
 
@@ -248,11 +266,35 @@ impl TaskspaceApp {
     }
 }
 
+fn is_visible_session_name(name: &str) -> bool {
+    !name.starts_with('.') && SessionName::parse(name).is_ok()
+}
+
+fn parse_visible_session_name(name: &str) -> Option<SessionName> {
+    if name.starts_with('.') {
+        return None;
+    }
+
+    SessionName::parse(name).ok()
+}
+
 /// Launches an editor with the given configuration.
 fn launch_editor(config: &EditorConfig, session_dir: &Path) -> Result<()> {
     let context = PlaceholderContext::new(session_dir);
     let expanded_cmd = expand_placeholders(&config.command, &context);
-    run_command(&expanded_cmd[0], &expanded_cmd[1..])
+
+    let Some((command, args)) = expanded_cmd.split_first() else {
+        return Err(anyhow!(TaskspaceError::Usage(
+            "editor command cannot be empty".to_string()
+        )));
+    };
+    if command.trim().is_empty() {
+        return Err(anyhow!(TaskspaceError::Usage(
+            "editor executable cannot be empty".to_string()
+        )));
+    }
+
+    run_command(command, args)
 }
 
 pub(crate) fn map_infra_error(err: anyhow::Error) -> anyhow::Error {
@@ -354,5 +396,42 @@ mod tests {
             })
             .expect_err("open last without sessions should fail");
         assert!(format!("{err}").contains("no session specified and no recent session found"));
+    }
+
+    #[test]
+    fn create_session_fails_for_unknown_editor_even_when_not_opening() {
+        let temp = tempdir().expect("temp dir");
+        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
+
+        let err = app
+            .create_session(NewSessionRequest {
+                name: SessionName::parse("demo").expect("name"),
+                repos: vec![],
+                open_after_create: false,
+                editor: "definitely-not-an-editor".to_string(),
+            })
+            .expect_err("unknown editor should fail");
+
+        assert!(format!("{err}").contains("unknown editor"));
+        assert!(!temp.path().join("demo").exists());
+    }
+
+    #[test]
+    fn list_sessions_ignores_non_session_directories() {
+        let temp = tempdir().expect("temp dir");
+        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
+
+        app.create_session(NewSessionRequest {
+            name: SessionName::parse("demo").expect("name"),
+            repos: vec![],
+            open_after_create: false,
+            editor: "opencode".to_string(),
+        })
+        .expect("create session");
+
+        fs::create_dir_all(temp.path().join(".archive")).expect("create archive dir");
+
+        let sessions = app.list_sessions().expect("list sessions");
+        assert_eq!(sessions, vec!["demo".to_string()]);
     }
 }

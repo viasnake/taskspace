@@ -7,8 +7,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
-use taskspace_core::{EditorConfig, default_editors};
+use anyhow::{Result, anyhow};
+use taskspace_core::{EditorConfig, TaskspaceError, default_editors};
 
 /// Global editor configuration loaded from config file and defaults.
 #[derive(Debug, Clone)]
@@ -41,8 +41,8 @@ impl EditorRegistry {
         if let Some(path) = config_path
             && path.exists()
         {
-            let file_config = load_config_file(path).context("failed to load config file")?;
-            merge_config(&mut editors, file_config);
+            let file_config = load_config_file(path)?;
+            merge_config(&mut editors, file_config)?;
         }
 
         Ok(Self { editors })
@@ -80,20 +80,52 @@ pub fn config_file_path() -> Option<PathBuf> {
 
 /// Loads the config file from disk.
 fn load_config_file(path: &Path) -> Result<FileConfig> {
-    let content = std::fs::read_to_string(path)
-        .with_context(|| format!("failed to read config file: {}", path.display()))?;
+    let content = std::fs::read_to_string(path).map_err(|err| {
+        anyhow!(TaskspaceError::Io(format!(
+            "failed to read config file '{}': {err}",
+            path.display()
+        )))
+    })?;
 
-    toml::from_str(&content)
-        .with_context(|| format!("failed to parse config file: {}", path.display()))
+    toml::from_str(&content).map_err(|err| {
+        anyhow!(TaskspaceError::Usage(format!(
+            "failed to parse config file '{}': {err}",
+            path.display()
+        )))
+    })
 }
 
 /// Merges file config into the editors map.
-fn merge_config(editors: &mut HashMap<String, EditorConfig>, file_config: FileConfig) {
+fn merge_config(
+    editors: &mut HashMap<String, EditorConfig>,
+    file_config: FileConfig,
+) -> Result<()> {
     for (name, editor_def) in file_config.editors {
         if let Some(command) = editor_def.command {
+            validate_editor_command(&name, &command)?;
             editors.insert(name, EditorConfig { command });
         }
     }
+
+    Ok(())
+}
+
+fn validate_editor_command(editor_name: &str, command: &[String]) -> Result<()> {
+    if command.is_empty() {
+        return Err(anyhow!(TaskspaceError::Usage(format!(
+            "invalid editor config '{}': command cannot be empty",
+            editor_name
+        ))));
+    }
+
+    if command[0].trim().is_empty() {
+        return Err(anyhow!(TaskspaceError::Usage(format!(
+            "invalid editor config '{}': executable cannot be empty",
+            editor_name
+        ))));
+    }
+
+    Ok(())
 }
 
 /// Configuration file structure (TOML format).
@@ -162,5 +194,43 @@ command = ["myeditor", "{dir}"]
         assert!(names.contains(&"opencode"));
         assert!(names.contains(&"codex"));
         assert!(names.contains(&"claude"));
+    }
+
+    #[test]
+    fn test_load_from_config_file_rejects_empty_command() {
+        let temp = tempdir().expect("tempdir");
+        let config_path = temp.path().join("config.toml");
+
+        std::fs::write(
+            &config_path,
+            r#"
+[editors.broken]
+command = []
+"#,
+        )
+        .expect("write config");
+
+        let err =
+            EditorRegistry::load_from(Some(&config_path)).expect_err("should reject empty command");
+        assert!(format!("{err}").contains("command cannot be empty"));
+    }
+
+    #[test]
+    fn test_load_from_config_file_rejects_empty_executable() {
+        let temp = tempdir().expect("tempdir");
+        let config_path = temp.path().join("config.toml");
+
+        std::fs::write(
+            &config_path,
+            r#"
+[editors.broken]
+command = ["   ", "{dir}"]
+"#,
+        )
+        .expect("write config");
+
+        let err = EditorRegistry::load_from(Some(&config_path))
+            .expect_err("should reject empty executable");
+        assert!(format!("{err}").contains("executable cannot be empty"));
     }
 }
