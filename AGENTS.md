@@ -149,7 +149,7 @@ pub enum EditorKind {
 #[derive(Debug, Clone)]
 pub struct NewSessionRequest {
     pub name: SessionName,
-    pub repos: Vec<RepoSpec>,
+    pub template_path: Option<PathBuf>,
     pub open_after_create: bool,
     pub editor: EditorKind,
 }

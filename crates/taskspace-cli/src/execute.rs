@@ -4,13 +4,13 @@ use taskspace_app::{
     ArchiveSessionRequest, DoctorReport, NewSessionRequest, OpenSessionRequest, OpenSessionTarget,
     RemoveSessionRequest, TaskspaceApp,
 };
-use taskspace_core::{RepoSpec, SessionName, TaskspaceError};
+use taskspace_core::{SessionName, TaskspaceError};
 
 #[derive(Debug, Clone)]
 pub enum CommandRequest {
     New {
         name: SessionName,
-        repos: Vec<RepoSpec>,
+        template_path: Option<PathBuf>,
         open_after_create: bool,
         editor: String,
     },
@@ -46,14 +46,14 @@ pub fn execute(
     match command {
         CommandRequest::New {
             name,
-            repos,
+            template_path,
             open_after_create,
             editor,
         } => {
             let created = app
                 .create_session(NewSessionRequest {
                     name,
-                    repos,
+                    template_path,
                     open_after_create,
                     editor,
                 })

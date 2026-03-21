@@ -1,4 +1,4 @@
-use taskspace_core::{RepoSpec, SessionName, TaskspaceError};
+use taskspace_core::{SessionName, TaskspaceError};
 
 use crate::Commands;
 use crate::execute::CommandRequest;
@@ -7,15 +7,12 @@ pub fn parse_command(command: Commands) -> Result<CommandRequest, TaskspaceError
     match command {
         Commands::New {
             name,
-            repos,
+            template,
             open,
             editor,
         } => Ok(CommandRequest::New {
             name: SessionName::parse(&name)?,
-            repos: repos
-                .iter()
-                .map(|raw| RepoSpec::parse(raw))
-                .collect::<Result<Vec<_>, _>>()?,
+            template_path: template.map(std::path::PathBuf::from),
             open_after_create: open,
             editor,
         }),
