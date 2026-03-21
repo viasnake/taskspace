@@ -1,11 +1,12 @@
 use std::path::PathBuf;
 
-use clap_complete::Shell;
 use taskspace_app::{
     ArchiveSessionRequest, DoctorReport, NewSessionRequest, OpenSessionRequest, OpenSessionTarget,
     RemoveSessionRequest, TaskspaceApp,
 };
 use taskspace_core::{SessionName, TaskspaceError};
+
+use crate::SupportedShell;
 
 #[derive(Debug, Clone)]
 pub enum CommandRequest {
@@ -30,8 +31,9 @@ pub enum CommandRequest {
     },
     Doctor,
     Completion {
-        shell: Option<Shell>,
+        shell: Option<SupportedShell>,
     },
+    CompleteSessions,
 }
 
 pub enum CommandResult {
@@ -98,6 +100,9 @@ pub fn execute(
         }
         CommandRequest::Completion { .. } => Err(TaskspaceError::Internal(
             "completion command should be handled before command execution".to_string(),
+        )),
+        CommandRequest::CompleteSessions => Err(TaskspaceError::Internal(
+            "complete-sessions command should be handled before command execution".to_string(),
         )),
     }
 }

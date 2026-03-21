@@ -257,7 +257,7 @@ fn binary_completion_bash_outputs_script() {
         .assert()
         .success()
         .stdout(predicates::str::contains("taskspace"))
-        .stdout(predicates::str::contains("new"));
+        .stdout(predicates::str::contains("__complete-sessions"));
 }
 
 #[test]
@@ -269,4 +269,62 @@ fn binary_completion_without_shell_uses_detected_shell() {
         .success()
         .stdout(predicates::str::contains("taskspace"))
         .stdout(predicates::str::contains("complete -F"));
+}
+
+#[test]
+fn binary_completion_rejects_powershell_and_elvish() {
+    let mut powershell = Command::cargo_bin("taskspace").expect("binary");
+    powershell
+        .arg("completion")
+        .arg("powershell")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("invalid value"));
+
+    let mut elvish = Command::cargo_bin("taskspace").expect("binary");
+    elvish
+        .arg("completion")
+        .arg("elvish")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("invalid value"));
+}
+
+#[test]
+fn binary_complete_sessions_lists_sessions_only() {
+    let temp = tempdir().expect("tempdir");
+    let root = temp.path().to_path_buf();
+
+    let mut new_cmd = Command::cargo_bin("taskspace").expect("binary");
+    new_cmd
+        .arg("--root")
+        .arg(root.to_str().expect("utf8"))
+        .arg("new")
+        .arg("demo")
+        .assert()
+        .success();
+
+    let mut complete_cmd = Command::cargo_bin("taskspace").expect("binary");
+    complete_cmd
+        .arg("--root")
+        .arg(root.to_str().expect("utf8"))
+        .arg("__complete-sessions")
+        .assert()
+        .success()
+        .stdout("demo\n");
+}
+
+#[test]
+fn binary_complete_sessions_empty_outputs_nothing() {
+    let temp = tempdir().expect("tempdir");
+    let root = temp.path().to_path_buf();
+
+    let mut complete_cmd = Command::cargo_bin("taskspace").expect("binary");
+    complete_cmd
+        .arg("--root")
+        .arg(root.to_str().expect("utf8"))
+        .arg("__complete-sessions")
+        .assert()
+        .success()
+        .stdout("");
 }

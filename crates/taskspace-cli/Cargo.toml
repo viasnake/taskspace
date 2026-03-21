@@ -12,7 +12,6 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
-clap_complete = "4.6.0"
 taskspace-app = { path = "../taskspace-app" }
 taskspace-core = { path = "../taskspace-core" }
 

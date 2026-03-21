@@ -39,5 +39,6 @@ pub fn parse_command(command: Commands) -> Result<CommandRequest, TaskspaceError
         }),
         Commands::Doctor => Ok(CommandRequest::Doctor),
         Commands::Completion { shell } => Ok(CommandRequest::Completion { shell }),
+        Commands::CompleteSessions => Ok(CommandRequest::CompleteSessions),
     }
 }
