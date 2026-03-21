@@ -24,7 +24,59 @@ fn binary_new_and_list_work() {
 }
 
 #[test]
-fn binary_rm_requires_yes() {
+fn binary_rm_with_yes_succeeds() {
+    let temp = tempdir().expect("tempdir");
+    let root = temp.path().to_path_buf();
+
+    let mut new_cmd = Command::cargo_bin("taskspace").expect("binary");
+    new_cmd
+        .arg("--root")
+        .arg(root.to_str().expect("utf8"))
+        .arg("new")
+        .arg("demo")
+        .assert()
+        .success();
+
+    let mut rm_cmd = Command::cargo_bin("taskspace").expect("binary");
+    rm_cmd
+        .arg("--root")
+        .arg(root.to_str().expect("utf8"))
+        .arg("rm")
+        .arg("demo")
+        .arg("--yes")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("removed session: demo"));
+}
+
+#[test]
+fn binary_rm_without_yes_fails_even_with_stdin_input_in_non_interactive_mode() {
+    let temp = tempdir().expect("tempdir");
+    let root = temp.path().to_path_buf();
+
+    let mut new_cmd = Command::cargo_bin("taskspace").expect("binary");
+    new_cmd
+        .arg("--root")
+        .arg(root.to_str().expect("utf8"))
+        .arg("new")
+        .arg("demo")
+        .assert()
+        .success();
+
+    let mut rm_cmd = Command::cargo_bin("taskspace").expect("binary");
+    rm_cmd
+        .arg("--root")
+        .arg(root.to_str().expect("utf8"))
+        .arg("rm")
+        .arg("demo")
+        .write_stdin("y\n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("without --yes"));
+}
+
+#[test]
+fn binary_rm_requires_yes_in_non_interactive_mode() {
     let temp = tempdir().expect("tempdir");
     let root = temp.path().to_path_buf();
 

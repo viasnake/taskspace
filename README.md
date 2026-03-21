@@ -148,7 +148,7 @@ taskspace rm <name> --dry-run
 taskspace rm <name> --yes
 ```
 
-`rm` is destructive and requires `--yes` unless `--dry-run` is used.
+`rm` is destructive. In interactive terminals it asks for confirmation when `--yes` is omitted, and in non-interactive environments it requires `--yes` unless `--dry-run` is used.
 
 ### Archive a session
 

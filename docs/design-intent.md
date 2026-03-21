@@ -30,7 +30,7 @@ It creates one isolated workspace for one task, with repository files and AI con
 
 ## Safety and operational rules
 
-- `rm` is destructive and requires `--yes`.
+- `rm` is destructive; interactive terminals ask for confirmation without `--yes`, while non-interactive environments require `--yes`.
 - `rm --dry-run` lets users verify targets without deletion.
 - `open` without a name opens the latest session by directory modified time.
 - External commands are executed with argument lists (not shell strings).

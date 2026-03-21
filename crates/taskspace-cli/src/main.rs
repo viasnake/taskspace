@@ -1,3 +1,4 @@
+use std::io::{BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 
 use clap::error::ErrorKind;
@@ -106,8 +107,58 @@ where
 fn run_with_cli(cli: Cli) -> Result<Vec<String>, TaskspaceError> {
     let app = TaskspaceApp::new(cli.root).map_err(execute::map_anyhow_error)?;
     let request = parse::parse_command(cli.command)?;
+    let stdin = std::io::stdin();
+    let stdin_is_terminal = stdin.is_terminal();
+    let mut input = stdin.lock();
+    let mut output = std::io::stderr().lock();
+    let request = maybe_confirm_remove(request, stdin_is_terminal, &mut input, &mut output)?;
     let result = execute::execute(&app, request)?;
     Ok(render::render(result))
+}
+
+fn maybe_confirm_remove(
+    request: execute::CommandRequest,
+    stdin_is_terminal: bool,
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+) -> Result<execute::CommandRequest, TaskspaceError> {
+    match request {
+        execute::CommandRequest::Remove { name, yes, dry_run } => {
+            if yes || dry_run || !stdin_is_terminal {
+                return Ok(execute::CommandRequest::Remove { name, yes, dry_run });
+            }
+
+            if ask_remove_confirmation(name.as_str(), input, output)? {
+                Ok(execute::CommandRequest::Remove {
+                    name,
+                    yes: true,
+                    dry_run: false,
+                })
+            } else {
+                Err(TaskspaceError::Usage("remove aborted by user".to_string()))
+            }
+        }
+        _ => Ok(request),
+    }
+}
+
+fn ask_remove_confirmation(
+    name: &str,
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+) -> Result<bool, TaskspaceError> {
+    write!(output, "remove session '{}'? [y/N]: ", name)
+        .map_err(|err| TaskspaceError::Io(err.to_string()))?;
+    output
+        .flush()
+        .map_err(|err| TaskspaceError::Io(err.to_string()))?;
+
+    let mut answer_raw = String::new();
+    input
+        .read_line(&mut answer_raw)
+        .map_err(|err| TaskspaceError::Io(err.to_string()))?;
+    let answer = answer_raw.trim().to_ascii_lowercase();
+    Ok(answer == "y" || answer == "yes")
 }
 
 enum ParseOutcome {
@@ -137,6 +188,7 @@ where
 mod tests {
     use super::*;
     use std::fs;
+    use std::io::Cursor;
     use tempfile::tempdir;
 
     #[test]
@@ -319,5 +371,65 @@ mod tests {
         ])
         .expect("doctor should run");
         assert!(out.iter().any(|line| line.starts_with("[FAIL]")));
+    }
+
+    #[test]
+    fn maybe_confirm_remove_accepts_yes_in_interactive_mode() {
+        let request = execute::CommandRequest::Remove {
+            name: taskspace_core::SessionName::parse("demo").expect("name"),
+            yes: false,
+            dry_run: false,
+        };
+        let mut input = Cursor::new("y\n");
+        let mut output = Vec::new();
+
+        let confirmed = maybe_confirm_remove(request, true, &mut input, &mut output)
+            .expect("confirmation should succeed");
+
+        assert!(
+            String::from_utf8(output)
+                .expect("utf8")
+                .contains("remove session 'demo'? [y/N]: ")
+        );
+        match confirmed {
+            execute::CommandRequest::Remove { yes, .. } => assert!(yes),
+            _ => panic!("expected remove command"),
+        }
+    }
+
+    #[test]
+    fn maybe_confirm_remove_declines_in_interactive_mode() {
+        let request = execute::CommandRequest::Remove {
+            name: taskspace_core::SessionName::parse("demo").expect("name"),
+            yes: false,
+            dry_run: false,
+        };
+        let mut input = Cursor::new("n\n");
+        let mut output = Vec::new();
+
+        let err = maybe_confirm_remove(request, true, &mut input, &mut output)
+            .expect_err("remove should be aborted");
+        assert!(matches!(err, TaskspaceError::Usage(_)));
+        assert!(format!("{err}").contains("remove aborted by user"));
+    }
+
+    #[test]
+    fn maybe_confirm_remove_keeps_yes_false_in_non_interactive_mode() {
+        let request = execute::CommandRequest::Remove {
+            name: taskspace_core::SessionName::parse("demo").expect("name"),
+            yes: false,
+            dry_run: false,
+        };
+        let mut input = Cursor::new("y\n");
+        let mut output = Vec::new();
+
+        let passthrough = maybe_confirm_remove(request, false, &mut input, &mut output)
+            .expect("non-interactive should not prompt");
+
+        assert!(output.is_empty());
+        match passthrough {
+            execute::CommandRequest::Remove { yes, .. } => assert!(!yes),
+            _ => panic!("expected remove command"),
+        }
     }
 }
