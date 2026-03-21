@@ -4,10 +4,9 @@ use anyhow::Result;
 use taskspace_infra_fs::run_command_capture;
 
 use crate::config::EditorRegistry;
-use crate::paths::{archive_root, global_skills_paths};
 use crate::spec;
 use crate::template::WorkspaceModel;
-use crate::validation::{validate_opencode_config, validate_workspace_yaml};
+use crate::validation::validate_workspace_yaml;
 use crate::{DoctorCategory, DoctorCheck, DoctorLevel, DoctorReport, TaskspaceApp};
 
 pub fn run(app: &TaskspaceApp, registry: &EditorRegistry) -> Result<DoctorReport> {
@@ -30,45 +29,11 @@ pub fn run(app: &TaskspaceApp, registry: &EditorRegistry) -> Result<DoctorReport
         });
     }
 
-    let skills_paths = global_skills_paths()?;
-    if skills_paths.iter().any(|path| path.exists()) {
-        checks.push(DoctorCheck {
-            category: DoctorCategory::Filesystem,
-            level: DoctorLevel::Ok,
-            message: "global SKILLS.md found".to_string(),
-        });
-    } else {
-        checks.push(DoctorCheck {
-            category: DoctorCategory::Filesystem,
-            level: DoctorLevel::Warn,
-            message: "global SKILLS.md not found (~/.taskspace/SKILLS.md or ~/.config/taskspace/SKILLS.md)"
-                .to_string(),
-        });
-    }
-
     if app.root_dir().exists() {
         for session in app.list_sessions()? {
             let session_dir = app.root_dir().join(&session);
             checks.extend(check_session(&session, &session_dir));
         }
-    }
-
-    let archive_root = archive_root(app.root_dir())?;
-    if archive_root.exists() {
-        checks.push(DoctorCheck {
-            category: DoctorCategory::Filesystem,
-            level: DoctorLevel::Ok,
-            message: format!("archive directory exists: {}", archive_root.display()),
-        });
-    } else {
-        checks.push(DoctorCheck {
-            category: DoctorCategory::Filesystem,
-            level: DoctorLevel::Warn,
-            message: format!(
-                "archive directory does not exist yet (it will be created on first archive): {}",
-                archive_root.display()
-            ),
-        });
     }
 
     // Check all editor commands from registry
@@ -158,21 +123,6 @@ fn check_session(name: &str, session_dir: &Path) -> Vec<DoctorCheck> {
     if let Some(workspace) = workspace {
         checks.extend(check_template_metadata(name, session_dir, &workspace));
     }
-
-    checks.push(
-        match validate_opencode_config(&session_dir.join(".opencode/opencode.jsonc")) {
-            Ok(()) => DoctorCheck {
-                category: DoctorCategory::Session,
-                level: DoctorLevel::Ok,
-                message: format!("session '{}' opencode instructions are valid", name),
-            },
-            Err(err) => DoctorCheck {
-                category: DoctorCategory::Session,
-                level: DoctorLevel::Fail,
-                message: format!("session '{}' opencode config invalid: {err}", name),
-            },
-        },
-    );
 
     checks
 }

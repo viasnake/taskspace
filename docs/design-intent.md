@@ -3,12 +3,12 @@
 ## What this tool is
 
 taskspace is a session-oriented workspace manager for AI coding.
-It creates one isolated workspace for one task, with project files and AI context files in one place.
+It creates one isolated workspace for one task with a minimal, explicit session schema.
 
 ## What v1 must guarantee
 
 - One task maps to one session directory.
-- AI context files are separated from repository content.
+- AI entrypoint, metadata, and working area are always present.
 - One session structure can be recreated consistently.
 - `taskspace new --open` starts work immediately.
 - `taskspace new --template <local-yaml>` can clone manifest projects and persist reproducibility metadata.
@@ -26,9 +26,10 @@ It creates one isolated workspace for one task, with project files and AI contex
 
 - `~/taskspace/<session>` is the active work area (session directories are directly under the taskspace root).
 - `~/taskspace/.archive/` stores archived sessions to keep deletion reversible by default.
-- `context/` stores ephemeral AI notes (`MEMORY`, `PLAN`, `CONSTRAINTS`, `DECISIONS`, `LINKS`).
+- `AGENTS.md` is the AI entrypoint.
 - `repos/` is a workspace area for project checkouts created from template manifest entries.
 - `workspace.yaml` stores reproducibility metadata (template reference, manifest).
+- Additional helper files are created on demand by user or AI.
 
 ## Safety and operational rules
 

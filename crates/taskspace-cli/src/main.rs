@@ -600,7 +600,7 @@ mod tests {
         ])
         .expect("create session");
 
-        fs::remove_file(root.join("demo/context/PLAN.md")).expect("remove file");
+        fs::remove_file(root.join("demo/AGENTS.md")).expect("remove file");
         let out = run_with_args([
             "taskspace",
             "--root",

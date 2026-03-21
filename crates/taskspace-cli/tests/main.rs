@@ -170,8 +170,8 @@ fn binary_open_without_name_uses_latest_session() {
 
     let old_dir = root.join("old");
     let new_dir = root.join("new");
-    let old_file = old_dir.join("SESSION.md");
-    let new_file = new_dir.join("SESSION.md");
+    let old_file = old_dir.join("AGENTS.md");
+    let new_file = new_dir.join("AGENTS.md");
     fs::write(&old_file, "old").expect("touch old");
     fs::write(&new_file, "new").expect("touch new");
 

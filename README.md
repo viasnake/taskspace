@@ -2,18 +2,17 @@
 
 **taskspace** is a session-oriented workspace manager for AI coding.
 
-It creates an isolated workspace per task, combining project files and AI context files into a single working environment.
+vNext keeps the default session schema minimal and agent-agnostic.
 
-## ✨ Features
+## Features
 
-* **Session-based workflow** (1 task = 1 workspace)
-* **Session reproducibility metadata**
-* **Non-commit AI context layer** (`MEMORY`, `PLAN`, etc.)
-* **Global AI skill definition (`SKILL.md`)**
-* **Editor integration (OpenCode / VS Code)**
-* **Agent-agnostic design** (OpenCode, Claude Code, Gemini CLI, etc.)
+- Session-based workflow (`1 task = 1 session`)
+- Minimal default session scaffold
+- Reproducibility metadata in `workspace.yaml`
+- Agent-agnostic session workflow
+- User/AI-extensible workspace (create helper files only when needed)
 
-## 📦 Install
+## Install
 
 ### Homebrew (recommended)
 
@@ -27,147 +26,57 @@ brew install viasnake/tap/taskspace
 mise use -g github:viasnake/taskspace@latest
 ```
 
-> `taskspace@latest` shortcut will be available after mise registry integration.
-
-## 🚀 Quick Start
+## Quick Start
 
 ```bash
 taskspace doctor
-taskspace new demo --open --editor code
+taskspace new demo --open
 ```
 
 This will:
 
-* Create a new session workspace
-* Initialize context files
-* Generate OpenCode configuration
-* Open the workspace in your editor
+- Create a minimal session workspace
+- Open it in your editor
+- Let you start work immediately
 
-## 🧠 Concepts
+## Concepts
 
 ### Session
 
-A unit of work (e.g., bug fix, feature, investigation)
+One task maps to one session workspace.
 
-```
-1 task = 1 session = 1 workspace
-```
+### `AGENTS.md`
 
-### Workspace
+The single session entrypoint for AI instructions.
 
-A directory containing:
+### `workspace.yaml`
 
-* project files
-* context files
-* AI configuration
+Machine-readable session facts and reproducibility metadata.
 
-### Context Layer
+### `repos/`
 
-Non-commit files for AI:
+Primary working area for cloned or manually added repositories.
 
-```
-context/
-  MEMORY.md
-  PLAN.md
-  CONSTRAINTS.md
-  DECISIONS.md
-  LINKS.md
-```
+### Additional files
 
-### Global Skill
+Any other helper file or directory is created on demand by the user or AI.
 
-AI behavior can be guided by a reusable taskspace skill.
+## Directory Structure
 
-taskspace keeps a convenient personal copy at:
+Default session schema:
 
-```
-~/.taskspace/SKILL.md
-```
-
-This file teaches the AI:
-
-* how to work inside a session
-* how to update context files
-* how to coordinate workspace work
-* how to operate safely
-
-The `SKILL.md` in this repository is the template you can copy or adapt for your editor's skill directory.
-
-### Recommended Skill Installation
-
-If you want your AI editor to use taskspace well without extra prompting, install this repository's `SKILL.md` as a reusable global skill.
-
-Recommended cross-editor location:
-
-```bash
-mkdir -p ~/.agents/skills/taskspace-session-management
-cp ./SKILL.md ~/.agents/skills/taskspace-session-management/SKILL.md
-```
-
-Why this path:
-
-* many agent-skill-compatible tools can use `~/.agents/skills/`
-* OpenCode can also use agent-compatible skill locations such as `.agents/skills`
-* The skill name matches the frontmatter name: `taskspace-session-management`
-
-OpenCode native global location:
-
-```bash
-mkdir -p ~/.config/opencode/skills/taskspace-session-management
-cp ./SKILL.md ~/.config/opencode/skills/taskspace-session-management/SKILL.md
-```
-
-Repository-local installation for a single project:
-
-```bash
-mkdir -p .agents/skills/taskspace-session-management
-cp ./SKILL.md .agents/skills/taskspace-session-management/SKILL.md
-```
-
-This is useful when you want taskspace behavior available only inside one repository or workspace.
-
-### What the Skill Helps the AI Do
-
-Once installed, the skill nudges the AI to:
-
-* create a new session for new work instead of editing random repositories directly
-* reopen an existing session instead of duplicating workspaces
-* keep planning, decisions, and memory in `context/`
-* treat `repos/` as a workspace area for project checkouts you manage
-* prefer `archive` over destructive cleanup
-* run `taskspace doctor` when workspace state looks wrong
-
-### Editor Notes
-
-* **OpenCode**: can use its native skill directory and agent-compatible locations such as `.agents/skills`
-* **Codex-style setups**: usually install reusable skills as `.agents/skills/<name>/SKILL.md`
-* **Other editors**: if your editor supports the agent skills standard or `SKILL.md`-based reusable instructions, use the same `taskspace-session-management` folder name and copy this file there
-
-If your editor supports both a global skill directory and a repository-local one, use the global directory when you want taskspace conventions everywhere and the repository-local directory when you want them only in selected repos.
-
-## 📁 Directory Structure
-
-```
+```text
 ~/taskspace/
   .archive/
-    <session>-<timestamp>/
-
   <session>/
-    SESSION.md
     AGENTS.md
     workspace.yaml
-
-    .opencode/
-      opencode.jsonc
-
-    context/
     repos/
-    references/
-    notes/
-    output/
 ```
 
-## ⚙️ Commands
+Templates may add more files and directories, but the default schema stays minimal.
+
+## Commands
 
 ### Create a session
 
@@ -183,17 +92,14 @@ taskspace new demo --template ./examples/template-minimal.yaml
 taskspace new demo --template ./examples/template-monorepo.yaml
 ```
 
-When a template contains `manifest.projects`, `taskspace new --template ...` clones those repositories into the session.
-Each cloned project records its resolved commit in `workspace.yaml` for reproducibility.
-
-`workspace.yaml` stores session reproducibility metadata (schema version, template reference, and manifest).
+When a template includes `manifest.projects`, `taskspace new --template ...` clones those repositories into the session and records resolved commits in `workspace.yaml`.
 
 ### Open a session
 
 ```bash
 taskspace open <name>
-taskspace open        # opens latest session
-taskspace open --last # opens latest session explicitly
+taskspace open
+taskspace open --last
 ```
 
 ### List sessions
@@ -202,8 +108,6 @@ taskspace open --last # opens latest session explicitly
 taskspace list
 taskspace ls
 ```
-
-If there are no sessions, `taskspace list` prints `no sessions found`.
 
 ### Remove a session
 
@@ -214,15 +118,13 @@ taskspace rm <name> --dry-run
 taskspace rm <name> --yes
 ```
 
-`rm` is destructive. In interactive terminals it asks for confirmation when `--yes` is omitted, and in non-interactive environments it requires `--yes` unless `--dry-run` is used.
-
 ### Archive a session
 
 ```bash
 taskspace archive <name>
 ```
 
-### Diagnose environment
+### Diagnose environment and sessions
 
 ```bash
 taskspace doctor
@@ -238,66 +140,30 @@ taskspace --version
 
 ### Shell completion
 
-Generate a completion script and load it in your shell.
-If `<shell>` is omitted, taskspace detects your shell from `$SHELL`.
-Supported shells are `bash`, `zsh`, and `fish`.
-
-Session names are completed dynamically for:
-
-* `taskspace open <name>`
-* `taskspace rm <name>`
-* `taskspace archive <name>`
-
 ```bash
-# auto-detect from $SHELL
-taskspace completion > ~/.local/share/bash-completion/completions/taskspace
-
-# bash
-taskspace completion bash > ~/.local/share/bash-completion/completions/taskspace
-
-# zsh
-taskspace completion zsh > ~/.zfunc/_taskspace
-
-# fish
-taskspace completion fish > ~/.config/fish/completions/taskspace.fish
+taskspace completion
+taskspace completion bash
+taskspace completion zsh
+taskspace completion fish
 ```
 
-## 🧩 AI Integration
+## AI Integration
 
-taskspace works with:
+taskspace works with OpenCode, Claude Code, Gemini CLI, and other file-aware coding agents.
 
-* OpenCode
-* Claude Code
-* Gemini CLI
-* Any AI coding agent that reads workspace files
+Recommended order:
 
-### Instruction Order
+1. Read `AGENTS.md`
+2. Optionally apply reusable global skills (such as `SKILL.md`)
+3. Create session-local helper files only when needed
 
-A typical taskspace-aware AI setup reads:
+## Safety
 
-1. `SESSION.md`
-2. `AGENTS.md`
-3. an installed taskspace `SKILL.md` from your editor's skill directory
-4. `context/CONSTRAINTS.md`
-5. `context/MEMORY.md`
-6. `context/PLAN.md`
+- `rm` is destructive; use `--dry-run` when unsure
+- Prefer `archive` over deletion when intent is unclear
+- Keep default schema minimal and explicit
 
-### Recommended AI Workflow
-
-1. Install `SKILL.md` into your editor's global or repository-local skill directory.
-2. Run `taskspace new <name> --open` for new work.
-3. If you have a local session template, run `taskspace new <name> --template <path>`.
-4. Let the AI operate inside the created session workspace.
-5. Keep workspace intent in `context/PLAN.md` and durable decisions in `context/DECISIONS.md`.
-6. Archive completed sessions unless you explicitly want deletion.
-
-## 🔒 Safety
-
-* Context files are **never committed**
-* Destructive commands are restricted
-* AI behavior is controlled via `AGENTS.md` and `SKILL.md`
-
-## 🛠 Development
+## Development
 
 ```bash
 git clone https://github.com/viasnake/taskspace
@@ -308,32 +174,14 @@ mise run build
 mise run check
 ```
 
-## 📌 Requirements
+## Philosophy
 
-* Git
-* OpenCode (or compatible AI CLI)
-* VS Code (optional)
+taskspace is a minimal session manager.
 
-## 🧭 Philosophy
+It guarantees only what is required to start and reproduce work:
 
-> Workspace is the unit of work — not the repository.
+- an AI entrypoint (`AGENTS.md`)
+- machine-readable metadata (`workspace.yaml`)
+- an isolated work area (`repos/`)
 
-taskspace treats:
-
-* project files
-* notes
-* AI context
-
-as equal components of a single working environment.
-
-## 📄 License
-
-TBD
-
-## 💡 Example
-
-```bash
-taskspace new auth-fix --open
-```
-
-Start coding immediately with full AI context.
+Everything else is optional and added on demand.

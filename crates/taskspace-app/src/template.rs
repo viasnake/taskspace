@@ -9,21 +9,11 @@ use taskspace_core::{TaskspaceError, WORKSPACE_SCHEMA_VERSION};
 use taskspace_infra_fs::{canonicalize_if_exists, read_file, write_file};
 
 use crate::map_infra_error;
-use crate::spec;
 
 const TEMPLATE_SCHEMA_VERSION: u32 = 1;
 
 pub fn create_base_structure(session_dir: &Path) -> Result<()> {
-    let dirs = [
-        "context",
-        "repos",
-        "references",
-        "notes",
-        "output",
-        ".opencode",
-        ".opencode/agents",
-        ".opencode/plugins",
-    ];
+    let dirs = ["repos"];
 
     for d in dirs {
         taskspace_infra_fs::create_dir(&session_dir.join(d)).map_err(map_infra_error)?;
@@ -51,33 +41,11 @@ pub fn resolve_workspace_model(
 }
 
 pub fn write_templates(session_dir: &Path, workspace: &WorkspaceModel) -> Result<()> {
-    let session_md = format!(
-        "# Session: {}\n\n## Objective\nDescribe the task objective.\n\n## Scope\nDescribe the scope and boundaries.\n",
+    let agents_md = format!(
+        "# Session: {}\n\n- Start from this file before any work.\n- Work inside `repos/` unless the task explicitly targets session metadata.\n- You may create helper files or directories in this session only when needed.\n- Prefer archive over destructive deletion.\n",
         workspace.name
     );
-    write_relative_file(session_dir, "SESSION.md", &session_md)?;
-
-    let agents_md = "# Agents Rules\n\n- Do not commit context files.\n- Avoid destructive commands unless explicitly requested.\n";
-    write_relative_file(session_dir, "AGENTS.md", agents_md)?;
-
-    write_relative_file(session_dir, "context/MEMORY.md", "# MEMORY\n")?;
-    write_relative_file(session_dir, "context/PLAN.md", "# PLAN\n")?;
-    write_relative_file(session_dir, "context/CONSTRAINTS.md", "# CONSTRAINTS\n")?;
-    write_relative_file(session_dir, "context/DECISIONS.md", "# DECISIONS\n")?;
-    write_relative_file(session_dir, "context/LINKS.md", "# LINKS\n")?;
-
-    let opencode_json = serde_json::json!({
-        "instructions": spec::default_instructions(),
-        "permission": {
-            "edit": "ask",
-            "bash": "ask",
-        }
-    });
-    write_relative_file(
-        session_dir,
-        ".opencode/opencode.jsonc",
-        &serde_json::to_string_pretty(&opencode_json)?,
-    )?;
+    write_relative_file(session_dir, "AGENTS.md", &agents_md)?;
 
     write_relative_file(
         session_dir,

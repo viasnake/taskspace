@@ -360,7 +360,7 @@ mod tests {
             fs::read_to_string(temp.path().join("demo/workspace.yaml")).expect("workspace yaml");
         let value: serde_yaml::Value = serde_yaml::from_str(&yaml).expect("valid yaml");
 
-        assert_eq!(value["version"].as_u64(), Some(3));
+        assert_eq!(value["version"].as_u64(), Some(4));
         assert_eq!(value["created_by"].as_str(), Some("template"));
         let expected_ref = path_to_string(&template_path);
         assert_eq!(
@@ -481,7 +481,7 @@ mod tests {
         })
         .expect("create");
 
-        fs::remove_file(temp.path().join("demo/context/PLAN.md")).expect("remove plan");
+        fs::remove_file(temp.path().join("demo/AGENTS.md")).expect("remove agents");
         let report = app.doctor().expect("doctor");
         assert!(
             report

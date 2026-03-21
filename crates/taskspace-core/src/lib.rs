@@ -4,7 +4,7 @@ pub use editor::{EditorConfig, PlaceholderContext, default_editors, expand_place
 
 use thiserror::Error;
 
-pub const WORKSPACE_SCHEMA_VERSION: u32 = 3;
+pub const WORKSPACE_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionName(String);
