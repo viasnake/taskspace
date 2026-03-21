@@ -60,6 +60,7 @@ taskspace archive <name>
 - Delete only when explicitly requested:
 
 ```bash
+taskspace rm <name>       # asks for confirmation in interactive terminals
 taskspace rm <name> --yes
 ```
 

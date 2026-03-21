@@ -1,7 +1,8 @@
+use std::io::{BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 
 use clap::error::ErrorKind;
-use clap::{ArgAction, Parser, Subcommand, ValueEnum};
+use clap::{ArgAction, Parser, Subcommand};
 use taskspace_app::TaskspaceApp;
 use taskspace_core::TaskspaceError;
 
@@ -40,13 +41,13 @@ pub(crate) enum Commands {
         repos: Vec<String>,
         #[arg(long)]
         open: bool,
-        #[arg(long, value_enum, default_value_t = CliEditor::Opencode)]
-        editor: CliEditor,
+        #[arg(long, default_value = "opencode")]
+        editor: String,
     },
     Open {
         name: Option<String>,
-        #[arg(long, value_enum, default_value_t = CliEditor::Opencode)]
-        editor: CliEditor,
+        #[arg(long, default_value = "opencode")]
+        editor: String,
         #[arg(long)]
         last: bool,
     },
@@ -64,12 +65,6 @@ pub(crate) enum Commands {
         name: String,
     },
     Doctor,
-}
-
-#[derive(Debug, Clone, Copy, ValueEnum)]
-pub(crate) enum CliEditor {
-    Opencode,
-    Code,
 }
 
 #[cfg(not(test))]
@@ -112,8 +107,58 @@ where
 fn run_with_cli(cli: Cli) -> Result<Vec<String>, TaskspaceError> {
     let app = TaskspaceApp::new(cli.root).map_err(execute::map_anyhow_error)?;
     let request = parse::parse_command(cli.command)?;
+    let stdin = std::io::stdin();
+    let stdin_is_terminal = stdin.is_terminal();
+    let mut input = stdin.lock();
+    let mut output = std::io::stderr().lock();
+    let request = maybe_confirm_remove(request, stdin_is_terminal, &mut input, &mut output)?;
     let result = execute::execute(&app, request)?;
     Ok(render::render(result))
+}
+
+fn maybe_confirm_remove(
+    request: execute::CommandRequest,
+    stdin_is_terminal: bool,
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+) -> Result<execute::CommandRequest, TaskspaceError> {
+    match request {
+        execute::CommandRequest::Remove { name, yes, dry_run } => {
+            if yes || dry_run || !stdin_is_terminal {
+                return Ok(execute::CommandRequest::Remove { name, yes, dry_run });
+            }
+
+            if ask_remove_confirmation(name.as_str(), input, output)? {
+                Ok(execute::CommandRequest::Remove {
+                    name,
+                    yes: true,
+                    dry_run: false,
+                })
+            } else {
+                Err(TaskspaceError::Usage("remove aborted by user".to_string()))
+            }
+        }
+        _ => Ok(request),
+    }
+}
+
+fn ask_remove_confirmation(
+    name: &str,
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+) -> Result<bool, TaskspaceError> {
+    write!(output, "remove session '{}'? [y/N]: ", name)
+        .map_err(|err| TaskspaceError::Io(err.to_string()))?;
+    output
+        .flush()
+        .map_err(|err| TaskspaceError::Io(err.to_string()))?;
+
+    let mut answer_raw = String::new();
+    input
+        .read_line(&mut answer_raw)
+        .map_err(|err| TaskspaceError::Io(err.to_string()))?;
+    let answer = answer_raw.trim().to_ascii_lowercase();
+    Ok(answer == "y" || answer == "yes")
 }
 
 enum ParseOutcome {
@@ -143,6 +188,7 @@ where
 mod tests {
     use super::*;
     use std::fs;
+    use std::io::Cursor;
     use tempfile::tempdir;
 
     #[test]
@@ -242,6 +288,67 @@ mod tests {
     }
 
     #[test]
+    fn new_with_default_editors() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path().to_path_buf();
+
+        // Test all default editor variants can be specified
+        for editor in ["opencode", "codex", "claude"] {
+            let name = format!("test-{}", editor);
+            let out = run_with_args([
+                "taskspace",
+                "--root",
+                root.to_str().expect("utf8"),
+                "new",
+                &name,
+                "--editor",
+                editor,
+            ])
+            .unwrap_or_else(|_| panic!("new with editor {} should succeed", editor));
+            assert!(
+                out[0].contains("created session"),
+                "editor {} should create session",
+                editor
+            );
+        }
+    }
+
+    #[test]
+    fn open_with_unknown_editor_fails_gracefully() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path().to_path_buf();
+
+        // Create a session first
+        run_with_args([
+            "taskspace",
+            "--root",
+            root.to_str().expect("utf8"),
+            "new",
+            "test-session",
+        ])
+        .expect("create test session");
+
+        // Test with a definitely non-existent editor
+        let err = run_with_args([
+            "taskspace",
+            "--root",
+            root.to_str().expect("utf8"),
+            "open",
+            "test-session",
+            "--editor",
+            "definitely-not-installed-editor-xyz",
+        ])
+        .expect_err("open with unknown editor should fail");
+
+        // Should fail with usage error (unknown editor)
+        assert!(
+            format!("{err}").contains("unknown editor"),
+            "should give unknown editor error, got: {}",
+            err
+        );
+    }
+
+    #[test]
     fn doctor_outputs_fail_label() {
         let temp = tempdir().expect("tempdir");
         let root = temp.path().to_path_buf();
@@ -264,5 +371,65 @@ mod tests {
         ])
         .expect("doctor should run");
         assert!(out.iter().any(|line| line.starts_with("[FAIL]")));
+    }
+
+    #[test]
+    fn maybe_confirm_remove_accepts_yes_in_interactive_mode() {
+        let request = execute::CommandRequest::Remove {
+            name: taskspace_core::SessionName::parse("demo").expect("name"),
+            yes: false,
+            dry_run: false,
+        };
+        let mut input = Cursor::new("y\n");
+        let mut output = Vec::new();
+
+        let confirmed = maybe_confirm_remove(request, true, &mut input, &mut output)
+            .expect("confirmation should succeed");
+
+        assert!(
+            String::from_utf8(output)
+                .expect("utf8")
+                .contains("remove session 'demo'? [y/N]: ")
+        );
+        match confirmed {
+            execute::CommandRequest::Remove { yes, .. } => assert!(yes),
+            _ => panic!("expected remove command"),
+        }
+    }
+
+    #[test]
+    fn maybe_confirm_remove_declines_in_interactive_mode() {
+        let request = execute::CommandRequest::Remove {
+            name: taskspace_core::SessionName::parse("demo").expect("name"),
+            yes: false,
+            dry_run: false,
+        };
+        let mut input = Cursor::new("n\n");
+        let mut output = Vec::new();
+
+        let err = maybe_confirm_remove(request, true, &mut input, &mut output)
+            .expect_err("remove should be aborted");
+        assert!(matches!(err, TaskspaceError::Usage(_)));
+        assert!(format!("{err}").contains("remove aborted by user"));
+    }
+
+    #[test]
+    fn maybe_confirm_remove_keeps_yes_false_in_non_interactive_mode() {
+        let request = execute::CommandRequest::Remove {
+            name: taskspace_core::SessionName::parse("demo").expect("name"),
+            yes: false,
+            dry_run: false,
+        };
+        let mut input = Cursor::new("y\n");
+        let mut output = Vec::new();
+
+        let passthrough = maybe_confirm_remove(request, false, &mut input, &mut output)
+            .expect("non-interactive should not prompt");
+
+        assert!(output.is_empty());
+        match passthrough {
+            execute::CommandRequest::Remove { yes, .. } => assert!(!yes),
+            _ => panic!("expected remove command"),
+        }
     }
 }
