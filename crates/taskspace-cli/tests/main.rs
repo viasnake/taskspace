@@ -248,3 +248,25 @@ fn binary_aliases_work() {
         .assert()
         .success();
 }
+
+#[test]
+fn binary_completion_bash_outputs_script() {
+    let mut cmd = Command::cargo_bin("taskspace").expect("binary");
+    cmd.arg("completion")
+        .arg("bash")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("taskspace"))
+        .stdout(predicates::str::contains("new"));
+}
+
+#[test]
+fn binary_completion_without_shell_uses_detected_shell() {
+    let mut cmd = Command::cargo_bin("taskspace").expect("binary");
+    cmd.env("SHELL", "/bin/bash")
+        .arg("completion")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("taskspace"))
+        .stdout(predicates::str::contains("complete -F"));
+}

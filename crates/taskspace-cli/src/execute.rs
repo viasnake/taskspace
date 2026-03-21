@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use clap_complete::Shell;
 use taskspace_app::{
     ArchiveSessionRequest, DoctorReport, NewSessionRequest, OpenSessionRequest, OpenSessionTarget,
     RemoveSessionRequest, TaskspaceApp,
@@ -28,6 +29,9 @@ pub enum CommandRequest {
         name: SessionName,
     },
     Doctor,
+    Completion {
+        shell: Option<Shell>,
+    },
 }
 
 pub enum CommandResult {
@@ -92,6 +96,9 @@ pub fn execute(
                 .map_err(map_anyhow_error)?;
             Ok(CommandResult::Archived(archived))
         }
+        CommandRequest::Completion { .. } => Err(TaskspaceError::Internal(
+            "completion command should be handled before command execution".to_string(),
+        )),
     }
 }
 

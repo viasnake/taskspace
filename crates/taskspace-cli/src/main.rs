@@ -1,8 +1,10 @@
 use std::io::{BufRead, IsTerminal, Write};
+use std::path::Path;
 use std::path::PathBuf;
 
 use clap::error::ErrorKind;
-use clap::{ArgAction, Parser, Subcommand};
+use clap::{ArgAction, CommandFactory, Parser, Subcommand};
+use clap_complete::{Shell, generate};
 use taskspace_app::TaskspaceApp;
 use taskspace_core::TaskspaceError;
 
@@ -65,6 +67,10 @@ pub(crate) enum Commands {
         name: String,
     },
     Doctor,
+    Completion {
+        #[arg(value_enum)]
+        shell: Option<Shell>,
+    },
 }
 
 #[cfg(not(test))]
@@ -105,8 +111,20 @@ where
 }
 
 fn run_with_cli(cli: Cli) -> Result<Vec<String>, TaskspaceError> {
-    let app = TaskspaceApp::new(cli.root).map_err(execute::map_anyhow_error)?;
-    let request = parse::parse_command(cli.command)?;
+    let Cli {
+        root,
+        command,
+        _version: _,
+    } = cli;
+    let request = parse::parse_command(command)?;
+    let request = match request {
+        execute::CommandRequest::Completion { shell } => {
+            let shell = shell.unwrap_or_else(detect_shell);
+            return Ok(vec![render_completion(shell)?]);
+        }
+        other => other,
+    };
+    let app = TaskspaceApp::new(root).map_err(execute::map_anyhow_error)?;
     let stdin = std::io::stdin();
     let stdin_is_terminal = stdin.is_terminal();
     let mut input = stdin.lock();
@@ -159,6 +177,35 @@ fn ask_remove_confirmation(
         .map_err(|err| TaskspaceError::Io(err.to_string()))?;
     let answer = answer_raw.trim().to_ascii_lowercase();
     Ok(answer == "y" || answer == "yes")
+}
+
+fn render_completion(shell: Shell) -> Result<String, TaskspaceError> {
+    let mut command = Cli::command();
+    let mut output = Vec::new();
+    generate(shell, &mut command, "taskspace", &mut output);
+    String::from_utf8(output).map_err(|err| TaskspaceError::Internal(err.to_string()))
+}
+
+fn detect_shell() -> Shell {
+    let shell_path = std::env::var_os("SHELL").unwrap_or_default();
+    let shell_name = Path::new(&shell_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    detect_shell_by_name(shell_name.as_str())
+}
+
+fn detect_shell_by_name(shell_name: &str) -> Shell {
+    match shell_name {
+        "bash" => Shell::Bash,
+        "zsh" => Shell::Zsh,
+        "fish" => Shell::Fish,
+        "pwsh" | "powershell" => Shell::PowerShell,
+        "elvish" => Shell::Elvish,
+        _ => Shell::Bash,
+    }
 }
 
 enum ParseOutcome {
@@ -287,6 +334,20 @@ mod tests {
         let err = run_with_args(["taskspace", "open", "demo", "--last"])
             .expect_err("name and --last should conflict");
         assert!(matches!(err, TaskspaceError::Usage(_)));
+    }
+
+    #[test]
+    fn completion_outputs_shell_script() {
+        let out =
+            run_with_args(["taskspace", "completion", "bash"]).expect("completion should succeed");
+        let script = out.join("\n");
+        assert!(script.contains("taskspace"));
+        assert!(script.contains("new"));
+    }
+
+    #[test]
+    fn detect_shell_defaults_to_bash_for_unknown_shell() {
+        assert!(matches!(detect_shell_by_name("unknown-shell"), Shell::Bash));
     }
 
     #[test]

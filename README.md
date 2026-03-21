@@ -236,6 +236,31 @@ taskspace -V
 taskspace --version
 ```
 
+### Shell completion
+
+Generate a completion script and load it in your shell.
+If `<shell>` is omitted, taskspace detects your shell from `$SHELL`.
+
+```bash
+# auto-detect from $SHELL
+taskspace completion > ~/.local/share/bash-completion/completions/taskspace
+
+# bash
+taskspace completion bash > ~/.local/share/bash-completion/completions/taskspace
+
+# zsh
+taskspace completion zsh > ~/.zfunc/_taskspace
+
+# fish
+taskspace completion fish > ~/.config/fish/completions/taskspace.fish
+
+# powershell
+taskspace completion powershell > taskspace.ps1
+
+# elvish
+taskspace completion elvish > ~/.config/elvish/lib/taskspace.elv
+```
+
 ## 🧩 AI Integration
 
 taskspace works with:
