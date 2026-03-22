@@ -191,6 +191,10 @@ mise run build
 mise run check
 ```
 
+Release process:
+
+- See [Release Guide](docs/release.md) for the minimum release procedure.
+
 ## Philosophy
 
 taskspace is a minimal session manager.
