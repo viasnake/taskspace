@@ -139,10 +139,9 @@ pub struct SessionName(String);
 
 // Enums: derive Debug, Clone, Copy, PartialEq, Eq where appropriate
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EditorKind {
-    #[default]
-    Opencode,
-    Code,
+pub enum OpenSessionTarget {
+    Name,
+    Last,
 }
 
 // Request/Response structs for public API
@@ -151,7 +150,6 @@ pub struct NewSessionRequest {
     pub name: SessionName,
     pub template_path: Option<PathBuf>,
     pub open_after_create: bool,
-    pub editor: EditorKind,
 }
 ```
 
@@ -166,8 +164,8 @@ pub struct NewSessionRequest {
 | Type | Convention | Example |
 |------|------------|---------|
 | Structs | PascalCase | `SessionName`, `TaskspaceApp` |
-| Enums | PascalCase | `EditorKind`, `TaskspaceError` |
-| Enum variants | PascalCase | `EditorKind::Opencode` |
+| Enums | PascalCase | `OpenSessionTarget`, `TaskspaceError` |
+| Enum variants | PascalCase | `OpenSessionTarget::Last` |
 | Functions | snake_case | `create_session()`, `map_infra_error()` |
 | Struct fields | snake_case | `root_dir`, `session_name` |
 | Constants | SCREAMING_SNAKE_CASE | `WORKSPACE_SCHEMA_VERSION` |

@@ -30,13 +30,13 @@ mise use -g github:viasnake/taskspace@latest
 
 ```bash
 taskspace doctor
-taskspace new demo --open --editor vscode --editor opencode
+taskspace new demo --open
 ```
 
 This will:
 
 - Create a minimal session workspace
-- Open it in the editors you choose
+- Open it using commands defined in `workspace.yaml`
 - Let you start work immediately
 
 ## Concepts
@@ -82,7 +82,6 @@ Templates may add more files and directories, but the default schema stays minim
 
 ```bash
 taskspace new <name> --open
-taskspace new <name> --open --editor vscode --editor opencode
 taskspace new <name> --template ./session-template.yaml --open
 ```
 
@@ -99,38 +98,31 @@ When a template includes `manifest.projects`, `taskspace new --template ...` clo
 
 ```bash
 taskspace open <name>
-taskspace open <name> --editor opencode --editor vscode
 taskspace open
 taskspace open --last
 ```
 
 Notes:
 
-- `--editor` can be repeated to compose multiple commands.
-- When `--editor` is omitted, taskspace uses `open.default_editors` from config and tries editors in order.
-- Missing editor executables are skipped; non-missing launch errors fail fast with context.
-- If all default editors are unavailable, `open` fails with actionable hints.
-- When `--editor` is explicitly provided, taskspace tries all specified editors and reports aggregate failures.
+- `open` reads `open.actions` from each session's `workspace.yaml`.
+- `open.actions` must exist and must not be empty.
+- All configured actions are executed in order.
+- If any action fails, `open` fails and reports aggregated errors.
 - `open` runs only in interactive local environments.
 - In non-interactive/SSH/CI environments, `taskspace open` fails fast, and `taskspace new --open` creates the session and skips opening.
 
-Config example (`~/.config/taskspace/config.toml`):
+`workspace.yaml` example:
 
-```toml
-[open]
-default_editors = ["opencode", "vscode", "codex", "claude", "neovim"]
-
-[editors.opencode]
-command = ["opencode", "{dir}"]
-
-[editors.vscode]
-command = ["code", "{dir}"]
-
-[editors.neovim]
-command = ["nvim", "{dir}"]
-
-[editors.mycli]
-command = ["mycli", "{dir}"]
+```yaml
+version: 5
+name: demo
+created_at: "2026-03-23T00:00:00Z"
+layout_version: 1
+created_by: manual
+open:
+  actions:
+    - command: ["opencode", "{dir}"]
+    - command: ["nvim", "{dir}"]
 ```
 
 ### List sessions
@@ -198,6 +190,21 @@ Recommended order:
 - `rm` is destructive; use `--dry-run` when unsure
 - Prefer `archive` over deletion when intent is unclear
 - Keep default schema minimal and explicit
+
+## Migration Notes
+
+- `workspace.yaml` schema is now `version: 5`.
+- `--editor` has been removed from `taskspace new` and `taskspace open`.
+- `taskspace open` now executes `workspace.yaml` `open.actions` in order.
+- Legacy `workspace.yaml` files without `open.actions` must be updated before `open`.
+
+Minimal v5 `open` block:
+
+```yaml
+open:
+  actions:
+    - command: ["opencode", "{dir}"]
+```
 
 ## Development
 

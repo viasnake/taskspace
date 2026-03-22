@@ -31,6 +31,7 @@ Use this skill when work should happen inside a taskspace session.
 - A session is the unit of work.
 - `AGENTS.md` is the AI entrypoint.
 - `workspace.yaml` is machine-readable metadata and reproducibility state.
+- `workspace.yaml` `open.actions` defines what `taskspace open` executes.
 - `repos/` is the primary working area for projects.
 - Additional structures are optional and created on demand.
 
@@ -45,13 +46,13 @@ taskspace doctor
 2. Create a new session for new work.
 
 ```bash
-taskspace new <name> [--template <local-yaml>] [--open] [--editor <name>]
+taskspace new <name> [--template <local-yaml>] [--open]
 ```
 
 3. If the session already exists, open it instead of creating another one.
 
 ```bash
-taskspace open <name> [--editor <name>]
+taskspace open <name>
 ```
 
 If the user wants to resume the latest session and does not name one, use:
@@ -59,6 +60,9 @@ If the user wants to resume the latest session and does not name one, use:
 ```bash
 taskspace open --last
 ```
+
+`open` runs only in interactive local environments.
+In non-interactive/SSH/CI environments, `taskspace open` fails and `taskspace new --open` creates the session and skips open.
 
 4. If the target session is unclear, inspect available sessions first.
 
@@ -83,6 +87,7 @@ taskspace list
 
 - The correct session has been created or opened.
 - `AGENTS.md`, `workspace.yaml`, and `repos/` exist in the session.
+- `workspace.yaml` contains non-empty `open.actions` before using `taskspace open`.
 - Project changes are made inside the intended directories under `repos/`.
 - `taskspace doctor` reports no FAIL checks before handoff when session health matters.
 - Cleanup actions match explicit user intent.
@@ -96,8 +101,8 @@ taskspace list
 ## Command reference
 
 ```bash
-taskspace new <name> [--template <local-yaml>] [--open] [--editor <name>]
-taskspace open <name> [--editor <name>]
+taskspace new <name> [--template <local-yaml>] [--open]
+taskspace open <name>
 taskspace open --last
 taskspace list
 taskspace ls
