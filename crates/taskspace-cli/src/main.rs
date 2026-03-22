@@ -5,14 +5,12 @@ use std::path::PathBuf;
 use clap::error::ErrorKind;
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use taskspace_app::TaskspaceApp;
-use taskspace_core::TaskspaceError;
+use taskspace_core::{TaskspaceError, default_editors};
 
 mod execute;
 mod exit_code;
 mod parse;
 mod render;
-
-const DEFAULT_OPEN_EDITORS: [&str; 4] = ["vscode", "opencode", "codex", "claude"];
 
 #[derive(Parser)]
 #[command(name = "taskspace")]
@@ -178,6 +176,7 @@ fn maybe_guard_open_with_context(
             template_path,
             open_after_create,
             editors,
+            editors_explicit,
         } => {
             let normalized_editors = normalized_editor_list(editors);
             if !open_after_create {
@@ -187,6 +186,7 @@ fn maybe_guard_open_with_context(
                         template_path,
                         open_after_create,
                         editors: normalized_editors,
+                        editors_explicit,
                     },
                     messages: Vec::new(),
                 });
@@ -199,6 +199,7 @@ fn maybe_guard_open_with_context(
                         template_path,
                         open_after_create: false,
                         editors: normalized_editors,
+                        editors_explicit,
                     },
                     messages: vec![format!("skipped opening session: {reason}")],
                 }),
@@ -208,12 +209,17 @@ fn maybe_guard_open_with_context(
                         template_path,
                         open_after_create,
                         editors: normalized_editors,
+                        editors_explicit,
                     },
                     messages: Vec::new(),
                 }),
             }
         }
-        execute::CommandRequest::Open { name, editors } => {
+        execute::CommandRequest::Open {
+            name,
+            editors,
+            editors_explicit,
+        } => {
             let normalized_editors = normalized_editor_list(editors);
             match context.block_reason() {
                 Some(reason) => Err(TaskspaceError::Usage(format!(
@@ -223,6 +229,7 @@ fn maybe_guard_open_with_context(
                     request: execute::CommandRequest::Open {
                         name,
                         editors: normalized_editors,
+                        editors_explicit,
                     },
                     messages: Vec::new(),
                 }),
@@ -277,9 +284,9 @@ fn normalized_editor_list(editors: Vec<String>) -> Vec<String> {
         .collect();
 
     if normalized.is_empty() {
-        return DEFAULT_OPEN_EDITORS
-            .iter()
-            .map(|name| (*name).to_string())
+        return default_editors()
+            .into_iter()
+            .map(|(name, _)| name.to_string())
             .collect();
     }
 
@@ -696,6 +703,7 @@ mod tests {
         let request = execute::CommandRequest::Open {
             name: Some(taskspace_core::SessionName::parse("demo").expect("name")),
             editors: vec!["vscode".to_string()],
+            editors_explicit: true,
         };
         let context = OpenContext {
             stdin_is_terminal: false,
@@ -716,6 +724,7 @@ mod tests {
             template_path: None,
             open_after_create: true,
             editors: vec!["vscode".to_string()],
+            editors_explicit: true,
         };
         let context = OpenContext {
             stdin_is_terminal: true,
@@ -733,12 +742,52 @@ mod tests {
             execute::CommandRequest::New {
                 open_after_create,
                 editors,
+                editors_explicit,
                 ..
             } => {
                 assert!(!open_after_create);
                 assert_eq!(editors, vec!["vscode".to_string()]);
+                assert!(editors_explicit);
             }
             _ => panic!("expected new command"),
+        }
+    }
+
+    #[test]
+    fn maybe_guard_open_keeps_implicit_editor_flag_for_open() {
+        let request = execute::CommandRequest::Open {
+            name: Some(taskspace_core::SessionName::parse("demo").expect("name")),
+            editors: Vec::new(),
+            editors_explicit: false,
+        };
+        let context = OpenContext {
+            stdin_is_terminal: true,
+            stdout_is_terminal: true,
+            has_ssh: false,
+            has_ci: false,
+        };
+
+        let guarded = maybe_guard_open_with_context(request, context)
+            .expect("open should proceed in interactive local context");
+
+        match guarded.request {
+            execute::CommandRequest::Open {
+                editors,
+                editors_explicit,
+                ..
+            } => {
+                assert_eq!(
+                    editors,
+                    vec![
+                        "vscode".to_string(),
+                        "opencode".to_string(),
+                        "codex".to_string(),
+                        "claude".to_string()
+                    ]
+                );
+                assert!(!editors_explicit);
+            }
+            _ => panic!("expected open command"),
         }
     }
 
