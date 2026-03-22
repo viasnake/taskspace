@@ -105,7 +105,13 @@ impl TaskspaceApp {
 
     pub fn create_session(&self, request: NewSessionRequest) -> Result<PathBuf> {
         if request.open_after_create {
-            self.resolve_editor_configs(&request.editors, request.editors_explicit)?;
+            let open_request = OpenSessionRequest {
+                target: OpenSessionTarget::Name(request.name.clone()),
+                editors: request.editors.clone(),
+                editors_explicit: request.editors_explicit,
+            };
+            let editor_names = self.resolve_open_editor_names(&open_request)?;
+            self.resolve_editor_configs(&editor_names, request.editors_explicit)?;
         }
         create_dir(&self.root_dir).map_err(map_infra_error)?;
 
@@ -158,6 +164,7 @@ impl TaskspaceApp {
     }
 
     pub fn open_session(&self, request: OpenSessionRequest) -> Result<()> {
+        let editor_names = self.resolve_open_editor_names(&request)?;
         let session_name = match request.target {
             OpenSessionTarget::Name(name) => name,
             OpenSessionTarget::Last => self.find_latest_session_name()?.ok_or_else(|| {
@@ -176,39 +183,45 @@ impl TaskspaceApp {
         }
 
         let editor_configs =
-            self.resolve_editor_configs(&request.editors, request.editors_explicit)?;
+            self.resolve_editor_configs(&editor_names, request.editors_explicit)?;
 
-        let mut failures = Vec::new();
-        let mut skipped_unavailable = Vec::new();
-        for (editor_name, editor_config) in editor_configs {
-            if let Err(err) = launch_editor(editor_config, &session_dir) {
-                if !request.editors_explicit && is_command_not_found(&err) {
-                    skipped_unavailable.push(editor_name.to_string());
-                    continue;
+        if request.editors_explicit {
+            let mut failures = Vec::new();
+            for (editor_name, editor_config) in editor_configs {
+                if let Err(err) = launch_editor(editor_config, &session_dir) {
+                    failures.push(format!("{editor_name}: {err:#}"));
                 }
-                failures.push(format!("{editor_name}: {err:#}"));
             }
-        }
 
-        let all_default_editors_unavailable =
-            !request.editors_explicit && skipped_unavailable.len() == request.editors.len();
-
-        if failures.is_empty() && !all_default_editors_unavailable {
-            Ok(())
-        } else {
-            if all_default_editors_unavailable {
-                return Err(anyhow!(TaskspaceError::ExternalCommand(format!(
-                    "failed to open session '{}': no default editors are available (skipped: [{}])\nhint: run 'taskspace doctor' or specify --editor <name>",
-                    session_name.as_str(),
-                    skipped_unavailable.join(", ")
-                ))));
+            if failures.is_empty() {
+                return Ok(());
             }
-            Err(anyhow!(TaskspaceError::ExternalCommand(format!(
+
+            return Err(anyhow!(TaskspaceError::ExternalCommand(format!(
                 "failed to open session '{}' with editors [{}]\nhint: run 'taskspace doctor' or specify --editor <name>",
                 session_name.as_str(),
                 failures.join("; ")
-            ))))
+            ))));
         }
+
+        for (editor_name, editor_config) in editor_configs {
+            match launch_editor(editor_config, &session_dir) {
+                Ok(_) => return Ok(()),
+                Err(err) if is_command_not_found(&err) => continue,
+                Err(err) => {
+                    return Err(anyhow!(TaskspaceError::ExternalCommand(format!(
+                        "failed to open session '{}' using default editor '{}': {err:#}\nhint: run 'taskspace doctor' or specify --editor <name>",
+                        session_name.as_str(),
+                        editor_name
+                    ))));
+                }
+            }
+        }
+
+        Err(anyhow!(TaskspaceError::ExternalCommand(format!(
+            "failed to open session '{}': no default editors are available\nhint: run 'taskspace doctor' or specify --editor <name>",
+            session_name.as_str(),
+        ))))
     }
 
     pub fn doctor(&self) -> Result<DoctorReport> {
@@ -268,6 +281,23 @@ impl TaskspaceApp {
 }
 
 impl TaskspaceApp {
+    fn resolve_open_editor_names(&self, request: &OpenSessionRequest) -> Result<Vec<String>> {
+        if request.editors_explicit {
+            if request.editors.is_empty() {
+                return Err(anyhow!(TaskspaceError::Usage(
+                    "at least one editor must be specified".to_string()
+                )));
+            }
+            return Ok(request.editors.clone());
+        }
+
+        if !request.editors.is_empty() {
+            return Ok(request.editors.clone());
+        }
+
+        Ok(self.editor_registry.default_open_editors().to_vec())
+    }
+
     fn resolve_editor_configs<'a>(
         &'a self,
         editors: &'a [String],
@@ -824,5 +854,86 @@ command = ["definitely-not-existing-command-xyz"]
         let rendered = format!("{err}");
         assert!(rendered.contains("failed to execute command"));
         assert!(rendered.contains("os error") || rendered.contains("No such file"));
+    }
+
+    #[test]
+    fn open_session_implicit_uses_configured_default_editors() {
+        let temp = tempdir().expect("temp dir");
+        let config_path = temp.path().join("config.toml");
+        fs::write(
+            &config_path,
+            r#"
+[editors.available]
+command = ["true"]
+
+[open]
+default_editors = ["available"]
+"#,
+        )
+        .expect("write config");
+
+        let app = TaskspaceApp {
+            root_dir: temp.path().to_path_buf(),
+            editor_registry: config::EditorRegistry::load_from(Some(&config_path))
+                .expect("registry"),
+        };
+
+        app.create_session(NewSessionRequest {
+            name: SessionName::parse("demo").expect("name"),
+            template_path: None,
+            open_after_create: false,
+            editors: vec!["available".to_string()],
+            editors_explicit: true,
+        })
+        .expect("create session");
+
+        app.open_session(OpenSessionRequest {
+            target: OpenSessionTarget::Name(SessionName::parse("demo").expect("name")),
+            editors: Vec::new(),
+            editors_explicit: false,
+        })
+        .expect("implicit open should use configured defaults");
+    }
+
+    #[test]
+    fn open_session_implicit_stops_after_first_success() {
+        let temp = tempdir().expect("temp dir");
+        let config_path = temp.path().join("config.toml");
+        fs::write(
+            &config_path,
+            r#"
+[editors.available]
+command = ["true"]
+
+[editors.failing]
+command = ["false"]
+
+[open]
+default_editors = ["available", "failing"]
+"#,
+        )
+        .expect("write config");
+
+        let app = TaskspaceApp {
+            root_dir: temp.path().to_path_buf(),
+            editor_registry: config::EditorRegistry::load_from(Some(&config_path))
+                .expect("registry"),
+        };
+
+        app.create_session(NewSessionRequest {
+            name: SessionName::parse("demo").expect("name"),
+            template_path: None,
+            open_after_create: false,
+            editors: vec!["available".to_string()],
+            editors_explicit: true,
+        })
+        .expect("create session");
+
+        app.open_session(OpenSessionRequest {
+            target: OpenSessionTarget::Name(SessionName::parse("demo").expect("name")),
+            editors: Vec::new(),
+            editors_explicit: false,
+        })
+        .expect("implicit open should stop after first successful launch");
     }
 }

@@ -2,7 +2,7 @@
 //!
 //! Loads and merges editor configurations from:
 //! - `~/.config/taskspace/config.toml` (XDG Base Directory)
-//! - Built-in defaults (vscode, opencode, codex, claude)
+//! - Built-in defaults from `taskspace_core::default_editors`
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -15,6 +15,8 @@ use taskspace_core::{EditorConfig, TaskspaceError, default_editors};
 pub struct EditorRegistry {
     /// Editor name -> EditorConfig mapping (merged from config + defaults)
     editors: HashMap<String, EditorConfig>,
+    /// Default editors used by `taskspace open` when `--editor` is omitted.
+    default_open_editors: Vec<String>,
 }
 
 impl EditorRegistry {
@@ -31,10 +33,12 @@ impl EditorRegistry {
     /// If the path is None or the file doesn't exist, only defaults are used.
     pub fn load_from(config_path: Option<&Path>) -> Result<Self> {
         let mut editors: HashMap<String, EditorConfig> = HashMap::new();
+        let mut default_open_editors = Vec::new();
 
         // Load defaults
         for (name, config) in default_editors() {
             editors.insert(name.to_string(), config);
+            default_open_editors.push(name.to_string());
         }
 
         // Load config file (if exists) and override/add entries
@@ -42,10 +46,17 @@ impl EditorRegistry {
             && path.exists()
         {
             let file_config = load_config_file(path)?;
-            merge_config(&mut editors, file_config)?;
+            merge_config(&mut editors, &file_config.editors)?;
+            if let Some(configured_defaults) = &file_config.open.default_editors {
+                default_open_editors =
+                    validate_default_open_editors(configured_defaults, &editors)?;
+            }
         }
 
-        Ok(Self { editors })
+        Ok(Self {
+            editors,
+            default_open_editors,
+        })
     }
 
     /// Gets the configuration for a named editor.
@@ -61,6 +72,11 @@ impl EditorRegistry {
     /// Gets all editor configurations with their names.
     pub fn all_editors(&self) -> impl Iterator<Item = (&str, &EditorConfig)> {
         self.editors.iter().map(|(k, v)| (k.as_str(), v))
+    }
+
+    /// Gets default editor names for implicit `open` requests.
+    pub fn default_open_editors(&self) -> &[String] {
+        &self.default_open_editors
     }
 }
 
@@ -98,16 +114,51 @@ fn load_config_file(path: &Path) -> Result<FileConfig> {
 /// Merges file config into the editors map.
 fn merge_config(
     editors: &mut HashMap<String, EditorConfig>,
-    file_config: FileConfig,
+    file_editors: &HashMap<String, EditorDefinition>,
 ) -> Result<()> {
-    for (name, editor_def) in file_config.editors {
-        if let Some(command) = editor_def.command {
-            validate_editor_command(&name, &command)?;
-            editors.insert(name, EditorConfig { command });
+    for (name, editor_def) in file_editors {
+        if let Some(command) = editor_def.command.as_ref() {
+            validate_editor_command(name, command)?;
+            editors.insert(
+                name.clone(),
+                EditorConfig {
+                    command: command.clone(),
+                },
+            );
         }
     }
 
     Ok(())
+}
+
+fn validate_default_open_editors(
+    default_open_editors: &[String],
+    editors: &HashMap<String, EditorConfig>,
+) -> Result<Vec<String>> {
+    if default_open_editors.is_empty() {
+        return Err(anyhow!(TaskspaceError::Usage(
+            "invalid open config: default_editors cannot be empty".to_string()
+        )));
+    }
+
+    let mut normalized = Vec::with_capacity(default_open_editors.len());
+    for editor in default_open_editors {
+        let name = editor.trim();
+        if name.is_empty() {
+            return Err(anyhow!(TaskspaceError::Usage(
+                "invalid open config: default_editors cannot contain empty names".to_string()
+            )));
+        }
+        if !editors.contains_key(name) {
+            return Err(anyhow!(TaskspaceError::Usage(format!(
+                "invalid open config: unknown editor '{}' in default_editors",
+                name
+            ))));
+        }
+        normalized.push(name.to_string());
+    }
+
+    Ok(normalized)
 }
 
 fn validate_editor_command(editor_name: &str, command: &[String]) -> Result<()> {
@@ -133,11 +184,18 @@ fn validate_editor_command(editor_name: &str, command: &[String]) -> Result<()> 
 struct FileConfig {
     #[serde(default)]
     editors: HashMap<String, EditorDefinition>,
+    #[serde(default)]
+    open: OpenConfig,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
 struct EditorDefinition {
     command: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+struct OpenConfig {
+    default_editors: Option<Vec<String>>,
 }
 
 #[cfg(test)]
@@ -153,6 +211,7 @@ mod tests {
         assert!(registry.get("opencode").is_some());
         assert!(registry.get("codex").is_some());
         assert!(registry.get("claude").is_some());
+        assert_eq!(registry.default_open_editors()[0], "vscode");
     }
 
     #[test]
@@ -173,6 +232,9 @@ mod tests {
             r#"
 [editors.myeditor]
 command = ["myeditor", "{dir}"]
+
+[open]
+default_editors = ["myeditor", "opencode"]
 "#,
         )
         .expect("write config");
@@ -185,6 +247,10 @@ command = ["myeditor", "{dir}"]
 
         // Defaults should still exist
         assert!(registry.get("opencode").is_some());
+        assert_eq!(
+            registry.default_open_editors(),
+            &["myeditor".to_string(), "opencode".to_string()]
+        );
     }
 
     #[test]
@@ -234,5 +300,43 @@ command = ["   ", "{dir}"]
         let err = EditorRegistry::load_from(Some(&config_path))
             .expect_err("should reject empty executable");
         assert!(format!("{err}").contains("executable cannot be empty"));
+    }
+
+    #[test]
+    fn test_load_from_config_file_rejects_empty_default_editors() {
+        let temp = tempdir().expect("tempdir");
+        let config_path = temp.path().join("config.toml");
+
+        std::fs::write(
+            &config_path,
+            r#"
+[open]
+default_editors = []
+"#,
+        )
+        .expect("write config");
+
+        let err = EditorRegistry::load_from(Some(&config_path))
+            .expect_err("should reject empty default_editors");
+        assert!(format!("{err}").contains("default_editors cannot be empty"));
+    }
+
+    #[test]
+    fn test_load_from_config_file_rejects_unknown_default_editor() {
+        let temp = tempdir().expect("tempdir");
+        let config_path = temp.path().join("config.toml");
+
+        std::fs::write(
+            &config_path,
+            r#"
+[open]
+default_editors = ["missing-editor"]
+"#,
+        )
+        .expect("write config");
+
+        let err = EditorRegistry::load_from(Some(&config_path))
+            .expect_err("should reject unknown default editor");
+        assert!(format!("{err}").contains("unknown editor 'missing-editor'"));
     }
 }

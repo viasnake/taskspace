@@ -107,12 +107,31 @@ taskspace open --last
 Notes:
 
 - `--editor` can be repeated to compose multiple commands.
-- When `--editor` is omitted, taskspace uses default editors in this order: `vscode`, `opencode`, `codex`, `claude`.
-- With omitted `--editor`, unavailable default editors are skipped, and opening succeeds if at least one editor launches.
+- When `--editor` is omitted, taskspace uses `open.default_editors` from config and tries editors in order.
+- Missing editor executables are skipped; non-missing launch errors fail fast with context.
 - If all default editors are unavailable, `open` fails with actionable hints.
-- When `--editor` is explicitly provided, any launch failure is treated as an error.
+- When `--editor` is explicitly provided, taskspace tries all specified editors and reports aggregate failures.
 - `open` runs only in interactive local environments.
 - In non-interactive/SSH/CI environments, `taskspace open` fails fast, and `taskspace new --open` creates the session and skips opening.
+
+Config example (`~/.config/taskspace/config.toml`):
+
+```toml
+[open]
+default_editors = ["opencode", "vscode", "codex", "claude", "neovim"]
+
+[editors.opencode]
+command = ["opencode", "{dir}"]
+
+[editors.vscode]
+command = ["code", "{dir}"]
+
+[editors.neovim]
+command = ["nvim", "{dir}"]
+
+[editors.mycli]
+command = ["mycli", "{dir}"]
+```
 
 ### List sessions
 

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use clap::error::ErrorKind;
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use taskspace_app::TaskspaceApp;
-use taskspace_core::{TaskspaceError, default_editors};
+use taskspace_core::TaskspaceError;
 
 mod execute;
 mod exit_code;
@@ -277,20 +277,11 @@ impl OpenContext {
 }
 
 fn normalized_editor_list(editors: Vec<String>) -> Vec<String> {
-    let normalized: Vec<String> = editors
+    editors
         .into_iter()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-        .collect();
-
-    if normalized.is_empty() {
-        return default_editors()
-            .into_iter()
-            .map(|(name, _)| name.to_string())
-            .collect();
-    }
-
-    normalized
+        .collect()
 }
 
 fn maybe_confirm_remove(
@@ -614,7 +605,7 @@ mod tests {
         let root = temp.path().to_path_buf();
 
         // Test all default editor variants can be specified
-        for editor in ["vscode", "opencode", "codex", "claude"] {
+        for (editor, _) in taskspace_core::default_editors() {
             let name = format!("test-{}", editor);
             let out = run_with_args([
                 "taskspace",
@@ -776,15 +767,7 @@ mod tests {
                 editors_explicit,
                 ..
             } => {
-                assert_eq!(
-                    editors,
-                    vec![
-                        "vscode".to_string(),
-                        "opencode".to_string(),
-                        "codex".to_string(),
-                        "claude".to_string()
-                    ]
-                );
+                assert!(editors.is_empty());
                 assert!(!editors_explicit);
             }
             _ => panic!("expected open command"),
@@ -792,17 +775,9 @@ mod tests {
     }
 
     #[test]
-    fn normalized_editor_list_uses_defaults_when_empty() {
+    fn normalized_editor_list_keeps_empty_when_not_specified() {
         let normalized = normalized_editor_list(Vec::new());
-        assert_eq!(
-            normalized,
-            vec![
-                "vscode".to_string(),
-                "opencode".to_string(),
-                "codex".to_string(),
-                "claude".to_string()
-            ]
-        );
+        assert!(normalized.is_empty());
     }
 
     #[test]

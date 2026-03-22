@@ -49,6 +49,36 @@ pub fn default_editors() -> Vec<(&'static str, EditorConfig)> {
                 ],
             },
         ),
+        (
+            "neovim",
+            EditorConfig {
+                command: vec!["nvim".to_string(), "{dir}".to_string()],
+            },
+        ),
+        (
+            "vim",
+            EditorConfig {
+                command: vec!["vim".to_string(), "{dir}".to_string()],
+            },
+        ),
+        (
+            "helix",
+            EditorConfig {
+                command: vec!["hx".to_string(), "{dir}".to_string()],
+            },
+        ),
+        (
+            "zed",
+            EditorConfig {
+                command: vec!["zed".to_string(), "{dir}".to_string()],
+            },
+        ),
+        (
+            "sublime",
+            EditorConfig {
+                command: vec!["subl".to_string(), "{dir}".to_string()],
+            },
+        ),
     ]
 }
 
@@ -137,6 +167,11 @@ mod tests {
         assert!(names.contains(&"opencode"));
         assert!(names.contains(&"codex"));
         assert!(names.contains(&"claude"));
+        assert!(names.contains(&"neovim"));
+        assert!(names.contains(&"vim"));
+        assert!(names.contains(&"helix"));
+        assert!(names.contains(&"zed"));
+        assert!(names.contains(&"sublime"));
     }
 
     #[test]
