@@ -153,10 +153,15 @@ taskspace --version
 ### Shell completion
 
 ```bash
-taskspace completion
 taskspace completion bash
 taskspace completion zsh
 taskspace completion fish
+```
+
+```bash
+taskspace completion bash > ~/.local/share/bash-completion/completions/taskspace
+taskspace completion zsh > ~/.local/share/zsh/site-functions/_taskspace
+taskspace completion fish > ~/.config/fish/completions/taskspace.fish
 ```
 
 ## AI Integration
