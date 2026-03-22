@@ -1,10 +1,6 @@
-pub mod editor;
-
-pub use editor::{EditorConfig, PlaceholderContext, default_editors, expand_placeholders};
-
 use thiserror::Error;
 
-pub const WORKSPACE_SCHEMA_VERSION: u32 = 4;
+pub const WORKSPACE_SCHEMA_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionName(String);

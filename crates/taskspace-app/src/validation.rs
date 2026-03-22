@@ -39,6 +39,26 @@ pub fn validate_workspace_yaml(path: &Path, expected_session_name: &str) -> Resu
         )));
     }
 
+    if parsed.open.actions.is_empty() {
+        return Err(anyhow!(TaskspaceError::Corrupt(
+            "open.actions must not be empty".to_string()
+        )));
+    }
+    for (index, action) in parsed.open.actions.iter().enumerate() {
+        if action.command.is_empty() {
+            return Err(anyhow!(TaskspaceError::Corrupt(format!(
+                "open.actions[{}].command must not be empty",
+                index
+            ))));
+        }
+        if action.command[0].trim().is_empty() {
+            return Err(anyhow!(TaskspaceError::Corrupt(format!(
+                "open.actions[{}].command executable must not be empty",
+                index
+            ))));
+        }
+    }
+
     if let Some(manifest) = &parsed.manifest {
         let manifest_errors = manifest_validation_errors(manifest);
         if !manifest_errors.is_empty() {

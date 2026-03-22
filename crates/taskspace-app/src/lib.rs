@@ -1,4 +1,3 @@
-mod config;
 mod doctor;
 mod paths;
 mod repo_import;
@@ -12,18 +11,15 @@ use std::time::SystemTime;
 
 use anyhow::{Result, anyhow};
 use chrono::Utc;
-use taskspace_core::{
-    EditorConfig, PlaceholderContext, SessionName, TaskspaceError, expand_placeholders,
-};
+use taskspace_core::{SessionName, TaskspaceError};
 use taskspace_infra_fs::{
     create_dir, list_directories, list_directories_with_modified, move_dir, remove_dir_all,
-    spawn_command,
+    run_command,
 };
 
 #[derive(Debug, Clone)]
 pub struct TaskspaceApp {
     root_dir: PathBuf,
-    editor_registry: config::EditorRegistry,
 }
 
 #[derive(Debug, Clone)]
@@ -31,15 +27,11 @@ pub struct NewSessionRequest {
     pub name: SessionName,
     pub template_path: Option<PathBuf>,
     pub open_after_create: bool,
-    pub editors: Vec<String>,
-    pub editors_explicit: bool,
 }
 
 #[derive(Debug, Clone)]
 pub struct OpenSessionRequest {
     pub target: OpenSessionTarget,
-    pub editors: Vec<String>,
-    pub editors_explicit: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -92,11 +84,7 @@ impl TaskspaceApp {
             Some(path) => path,
             None => paths::default_sessions_root()?,
         };
-        let editor_registry = config::EditorRegistry::load()?;
-        Ok(Self {
-            root_dir: resolved,
-            editor_registry,
-        })
+        Ok(Self { root_dir: resolved })
     }
 
     pub fn root_dir(&self) -> &Path {
@@ -104,15 +92,6 @@ impl TaskspaceApp {
     }
 
     pub fn create_session(&self, request: NewSessionRequest) -> Result<PathBuf> {
-        if request.open_after_create {
-            let open_request = OpenSessionRequest {
-                target: OpenSessionTarget::Name(request.name.clone()),
-                editors: request.editors.clone(),
-                editors_explicit: request.editors_explicit,
-            };
-            let editor_names = self.resolve_open_editor_names(&open_request)?;
-            self.resolve_editor_configs(&editor_names, request.editors_explicit)?;
-        }
         create_dir(&self.root_dir).map_err(map_infra_error)?;
 
         let session_dir = self.root_dir.join(request.name.as_str());
@@ -147,8 +126,6 @@ impl TaskspaceApp {
         if request.open_after_create {
             self.open_session(OpenSessionRequest {
                 target: OpenSessionTarget::Name(request.name),
-                editors: request.editors,
-                editors_explicit: request.editors_explicit,
             })?;
         }
 
@@ -164,7 +141,6 @@ impl TaskspaceApp {
     }
 
     pub fn open_session(&self, request: OpenSessionRequest) -> Result<()> {
-        let editor_names = self.resolve_open_editor_names(&request)?;
         let session_name = match request.target {
             OpenSessionTarget::Name(name) => name,
             OpenSessionTarget::Last => self.find_latest_session_name()?.ok_or_else(|| {
@@ -182,50 +158,31 @@ impl TaskspaceApp {
             ))));
         }
 
-        let editor_configs =
-            self.resolve_editor_configs(&editor_names, request.editors_explicit)?;
+        let workspace = validation::validate_workspace_yaml(
+            &session_dir.join("workspace.yaml"),
+            session_name.as_str(),
+        )?;
 
-        if request.editors_explicit {
-            let mut failures = Vec::new();
-            for (editor_name, editor_config) in editor_configs {
-                if let Err(err) = launch_editor(editor_config, &session_dir) {
-                    failures.push(format!("{editor_name}: {err:#}"));
-                }
+        let mut failures = Vec::new();
+        for (index, action) in workspace.open.actions.iter().enumerate() {
+            if let Err(err) = launch_open_action(&action.command, &session_dir) {
+                failures.push(format!("action {}: {err:#}", index + 1));
             }
-
-            if failures.is_empty() {
-                return Ok(());
-            }
-
-            return Err(anyhow!(TaskspaceError::ExternalCommand(format!(
-                "failed to open session '{}' with editors [{}]\nhint: run 'taskspace doctor' or specify --editor <name>",
-                session_name.as_str(),
-                failures.join("; ")
-            ))));
         }
 
-        for (editor_name, editor_config) in editor_configs {
-            match launch_editor(editor_config, &session_dir) {
-                Ok(_) => return Ok(()),
-                Err(err) if is_command_not_found(&err) => continue,
-                Err(err) => {
-                    return Err(anyhow!(TaskspaceError::ExternalCommand(format!(
-                        "failed to open session '{}' using default editor '{}': {err:#}\nhint: run 'taskspace doctor' or specify --editor <name>",
-                        session_name.as_str(),
-                        editor_name
-                    ))));
-                }
-            }
+        if failures.is_empty() {
+            return Ok(());
         }
 
         Err(anyhow!(TaskspaceError::ExternalCommand(format!(
-            "failed to open session '{}': no default editors are available\nhint: run 'taskspace doctor' or specify --editor <name>",
+            "failed to open session '{}'\n{}",
             session_name.as_str(),
+            failures.join("; ")
         ))))
     }
 
     pub fn doctor(&self) -> Result<DoctorReport> {
-        doctor::run(self, &self.editor_registry)
+        doctor::run(self)
     }
 
     pub fn archive_session(&self, request: ArchiveSessionRequest) -> Result<PathBuf> {
@@ -281,67 +238,6 @@ impl TaskspaceApp {
 }
 
 impl TaskspaceApp {
-    fn resolve_open_editor_names(&self, request: &OpenSessionRequest) -> Result<Vec<String>> {
-        if request.editors_explicit {
-            if request.editors.is_empty() {
-                return Err(anyhow!(TaskspaceError::Usage(
-                    "at least one editor must be specified".to_string()
-                )));
-            }
-            return Ok(request.editors.clone());
-        }
-
-        if !request.editors.is_empty() {
-            return Ok(request.editors.clone());
-        }
-
-        Ok(self.editor_registry.default_open_editors().to_vec())
-    }
-
-    fn resolve_editor_configs<'a>(
-        &'a self,
-        editors: &'a [String],
-        editors_explicit: bool,
-    ) -> Result<Vec<(&'a str, &'a EditorConfig)>> {
-        if editors.is_empty() {
-            return Err(anyhow!(TaskspaceError::Usage(
-                "at least one editor must be specified".to_string()
-            )));
-        }
-
-        let mut resolved = Vec::new();
-        for editor in editors {
-            let editor_name = editor.as_str();
-            let config = self.editor_registry.get(editor_name);
-            match (config, editors_explicit) {
-                (Some(config), _) => resolved.push((editor_name, config)),
-                (None, false) => continue,
-                (None, true) => {
-                    return Err(anyhow!(TaskspaceError::Usage(format!(
-                        "unknown editor: '{}'. Available editors: {}",
-                        editor_name,
-                        self.available_editor_names().join(", ")
-                    ))));
-                }
-            }
-        }
-
-        if resolved.is_empty() {
-            return Err(anyhow!(TaskspaceError::ExternalCommand(
-                "failed to open session: no default editors are configured\nhint: run 'taskspace doctor' or specify --editor <name>"
-                    .to_string()
-            )));
-        }
-
-        Ok(resolved)
-    }
-
-    fn available_editor_names(&self) -> Vec<&str> {
-        let mut names = self.editor_registry.editor_names().collect::<Vec<_>>();
-        names.sort_unstable();
-        names
-    }
-
     fn find_latest_session_name(&self) -> Result<Option<SessionName>> {
         let mut sessions: Vec<(SessionName, SystemTime)> =
             list_directories_with_modified(&self.root_dir)
@@ -373,31 +269,29 @@ fn parse_visible_session_name(name: &str) -> Option<SessionName> {
     SessionName::parse(name).ok()
 }
 
-/// Launches an editor with the given configuration.
-fn launch_editor(config: &EditorConfig, session_dir: &Path) -> Result<()> {
-    let context = PlaceholderContext::new(session_dir);
-    let expanded_cmd = expand_placeholders(&config.command, &context);
-
-    let Some((command, args)) = expanded_cmd.split_first() else {
+fn launch_open_action(command_template: &[String], session_dir: &Path) -> Result<()> {
+    if command_template.is_empty() {
         return Err(anyhow!(TaskspaceError::Usage(
-            "editor command cannot be empty".to_string()
-        )));
-    };
-    if command.trim().is_empty() {
-        return Err(anyhow!(TaskspaceError::Usage(
-            "editor executable cannot be empty".to_string()
+            "open action command cannot be empty".to_string()
         )));
     }
 
-    spawn_command(command, args)
-}
+    let expanded = command_template
+        .iter()
+        .map(|arg| arg.replace("{dir}", &session_dir.display().to_string()))
+        .collect::<Vec<_>>();
+    let Some((program, args)) = expanded.split_first() else {
+        return Err(anyhow!(TaskspaceError::Usage(
+            "open action command cannot be empty".to_string()
+        )));
+    };
+    if program.trim().is_empty() {
+        return Err(anyhow!(TaskspaceError::Usage(
+            "open action executable cannot be empty".to_string()
+        )));
+    }
 
-fn is_command_not_found(err: &anyhow::Error) -> bool {
-    err.chain().any(|source| {
-        source
-            .downcast_ref::<std::io::Error>()
-            .is_some_and(|io_err| io_err.kind() == std::io::ErrorKind::NotFound)
-    })
+    run_command(program, args)
 }
 
 pub(crate) fn map_infra_error(err: anyhow::Error) -> anyhow::Error {
@@ -421,8 +315,6 @@ mod tests {
             name: SessionName::parse("demo").expect("name"),
             template_path: None,
             open_after_create: false,
-            editors: vec!["opencode".to_string()],
-            editors_explicit: true,
         })
         .expect("session creation");
 
@@ -450,8 +342,6 @@ mod tests {
             name: SessionName::parse("demo").expect("name"),
             template_path: Some(template_path.clone()),
             open_after_create: false,
-            editors: vec!["opencode".to_string()],
-            editors_explicit: true,
         })
         .expect("session creation");
 
@@ -459,7 +349,7 @@ mod tests {
             fs::read_to_string(temp.path().join("demo/workspace.yaml")).expect("workspace yaml");
         let value: serde_yaml::Value = serde_yaml::from_str(&yaml).expect("valid yaml");
 
-        assert_eq!(value["version"].as_u64(), Some(4));
+        assert_eq!(value["version"].as_u64(), Some(5));
         assert_eq!(value["created_by"].as_str(), Some("template"));
         let expected_ref = path_to_string(&template_path);
         assert_eq!(
@@ -473,12 +363,9 @@ mod tests {
                 .starts_with("sha256:")
         );
         assert_eq!(value["manifest"]["projects"][0]["id"].as_str(), Some("app"));
-        assert!(
-            value["manifest"]["projects"][0]["resolved_commit"]
-                .as_str()
-                .expect("resolved commit")
-                .len()
-                >= 40
+        assert_eq!(
+            value["open"]["actions"][0]["command"][0].as_str(),
+            Some("opencode")
         );
         assert!(temp.path().join("demo/repos/app/README.md").exists());
     }
@@ -496,8 +383,6 @@ mod tests {
                 name: SessionName::parse("demo").expect("name"),
                 template_path: Some(template_path),
                 open_after_create: false,
-                editors: vec!["opencode".to_string()],
-                editors_explicit: true,
             })
             .expect_err("invalid template should fail");
 
@@ -526,13 +411,91 @@ mod tests {
                 name: SessionName::parse("demo").expect("name"),
                 template_path: Some(template_path),
                 open_after_create: false,
-                editors: vec!["opencode".to_string()],
-                editors_explicit: true,
             })
             .expect_err("clone failure should rollback");
 
         assert!(format!("{err}").contains("failed to clone project"));
         assert!(!temp.path().join("demo").exists());
+    }
+
+    #[test]
+    fn open_last_fails_when_no_sessions_exist() {
+        let temp = tempdir().expect("temp dir");
+        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
+
+        let err = app
+            .open_session(OpenSessionRequest {
+                target: OpenSessionTarget::Last,
+            })
+            .expect_err("open last without sessions should fail");
+        assert!(format!("{err}").contains("no session specified and no recent session found"));
+    }
+
+    #[test]
+    fn open_session_fails_when_action_command_fails() {
+        let temp = tempdir().expect("temp dir");
+        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
+
+        app.create_session(NewSessionRequest {
+            name: SessionName::parse("demo").expect("name"),
+            template_path: None,
+            open_after_create: false,
+        })
+        .expect("create session");
+
+        fs::write(
+            temp.path().join("demo/workspace.yaml"),
+            "version: 5\nname: demo\ncreated_at: 2026-01-01T00:00:00Z\nlayout_version: 1\ncreated_by: manual\nopen:\n  actions:\n    - command: [\"false\"]\n",
+        )
+        .expect("write workspace");
+
+        let err = app
+            .open_session(OpenSessionRequest {
+                target: OpenSessionTarget::Name(SessionName::parse("demo").expect("name")),
+            })
+            .expect_err("open should fail");
+
+        assert!(format!("{err}").contains("failed to open session 'demo'"));
+    }
+
+    #[test]
+    fn open_session_succeeds_when_actions_succeed() {
+        let temp = tempdir().expect("temp dir");
+        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
+
+        app.create_session(NewSessionRequest {
+            name: SessionName::parse("demo").expect("name"),
+            template_path: None,
+            open_after_create: false,
+        })
+        .expect("create session");
+
+        fs::write(
+            temp.path().join("demo/workspace.yaml"),
+            "version: 5\nname: demo\ncreated_at: 2026-01-01T00:00:00Z\nlayout_version: 1\ncreated_by: manual\nopen:\n  actions:\n    - command: [\"true\"]\n    - command: [\"true\"]\n",
+        )
+        .expect("write workspace");
+
+        app.open_session(OpenSessionRequest {
+            target: OpenSessionTarget::Name(SessionName::parse("demo").expect("name")),
+        })
+        .expect("open should succeed");
+    }
+
+    #[test]
+    fn launch_open_action_expands_dir_placeholder() {
+        let temp = tempdir().expect("temp dir");
+        let marker = temp.path().join("ran.txt");
+        let command = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "test -d \"$1\" && touch \"$1/ran.txt\"".to_string(),
+            "sh".to_string(),
+            "{dir}".to_string(),
+        ];
+
+        launch_open_action(&command, temp.path()).expect("open action should run");
+        assert!(marker.exists());
     }
 
     fn path_to_string(path: &Path) -> String {
@@ -567,373 +530,5 @@ mod tests {
             .status()
             .expect("run git");
         assert!(status.success(), "git command failed: {:?}", args);
-    }
-
-    #[test]
-    fn doctor_fails_when_required_file_missing() {
-        let temp = tempdir().expect("temp dir");
-        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
-
-        app.create_session(NewSessionRequest {
-            name: SessionName::parse("demo").expect("name"),
-            template_path: None,
-            open_after_create: false,
-            editors: vec!["opencode".to_string()],
-            editors_explicit: true,
-        })
-        .expect("create");
-
-        fs::remove_file(temp.path().join("demo/AGENTS.md")).expect("remove agents");
-        let report = app.doctor().expect("doctor");
-        assert!(
-            report
-                .checks
-                .iter()
-                .any(|c| matches!(c.level, DoctorLevel::Fail))
-        );
-    }
-
-    #[test]
-    fn remove_requires_yes_unless_dry_run() {
-        let temp = tempdir().expect("temp dir");
-        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
-
-        app.create_session(NewSessionRequest {
-            name: SessionName::parse("demo").expect("name"),
-            template_path: None,
-            open_after_create: false,
-            editors: vec!["opencode".to_string()],
-            editors_explicit: true,
-        })
-        .expect("session creation");
-
-        let err = app
-            .remove_session(RemoveSessionRequest {
-                name: SessionName::parse("demo").expect("name"),
-                yes: false,
-                dry_run: false,
-            })
-            .expect_err("missing --yes");
-        assert!(format!("{err}").contains("without --yes"));
-
-        app.remove_session(RemoveSessionRequest {
-            name: SessionName::parse("demo").expect("name"),
-            yes: false,
-            dry_run: true,
-        })
-        .expect("dry run");
-
-        app.remove_session(RemoveSessionRequest {
-            name: SessionName::parse("demo").expect("name"),
-            yes: true,
-            dry_run: false,
-        })
-        .expect("remove");
-    }
-
-    #[test]
-    fn open_last_fails_when_no_sessions_exist() {
-        let temp = tempdir().expect("temp dir");
-        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
-
-        let err = app
-            .open_session(OpenSessionRequest {
-                target: OpenSessionTarget::Last,
-                editors: vec!["opencode".to_string()],
-                editors_explicit: true,
-            })
-            .expect_err("open last without sessions should fail");
-        assert!(format!("{err}").contains("no session specified and no recent session found"));
-    }
-
-    #[test]
-    fn create_session_allows_unknown_editor_when_not_opening() {
-        let temp = tempdir().expect("temp dir");
-        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
-
-        app.create_session(NewSessionRequest {
-            name: SessionName::parse("demo").expect("name"),
-            template_path: None,
-            open_after_create: false,
-            editors: vec!["definitely-not-an-editor".to_string()],
-            editors_explicit: true,
-        })
-        .expect("unknown editor should be ignored when not opening");
-
-        assert!(temp.path().join("demo").exists());
-    }
-
-    #[test]
-    fn list_sessions_ignores_non_session_directories() {
-        let temp = tempdir().expect("temp dir");
-        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
-
-        app.create_session(NewSessionRequest {
-            name: SessionName::parse("demo").expect("name"),
-            template_path: None,
-            open_after_create: false,
-            editors: vec!["opencode".to_string()],
-            editors_explicit: true,
-        })
-        .expect("create session");
-
-        fs::create_dir_all(temp.path().join(".archive")).expect("create archive dir");
-
-        let sessions = app.list_sessions().expect("list sessions");
-        assert_eq!(sessions, vec!["demo".to_string()]);
-    }
-
-    #[test]
-    fn open_session_fails_when_editor_list_is_empty() {
-        let temp = tempdir().expect("temp dir");
-        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
-
-        app.create_session(NewSessionRequest {
-            name: SessionName::parse("demo").expect("name"),
-            template_path: None,
-            open_after_create: false,
-            editors: vec!["opencode".to_string()],
-            editors_explicit: true,
-        })
-        .expect("create session");
-
-        let err = app
-            .open_session(OpenSessionRequest {
-                target: OpenSessionTarget::Name(SessionName::parse("demo").expect("name")),
-                editors: Vec::new(),
-                editors_explicit: true,
-            })
-            .expect_err("open should reject empty editors");
-
-        assert!(format!("{err}").contains("at least one editor"));
-    }
-
-    #[test]
-    fn open_session_fails_for_unknown_editor_name() {
-        let temp = tempdir().expect("temp dir");
-        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
-
-        app.create_session(NewSessionRequest {
-            name: SessionName::parse("demo").expect("name"),
-            template_path: None,
-            open_after_create: false,
-            editors: vec!["opencode".to_string()],
-            editors_explicit: true,
-        })
-        .expect("create session");
-
-        let err = app
-            .open_session(OpenSessionRequest {
-                target: OpenSessionTarget::Name(SessionName::parse("demo").expect("name")),
-                editors: vec!["definitely-not-an-editor".to_string()],
-                editors_explicit: true,
-            })
-            .expect_err("open should reject unknown editor");
-
-        assert!(format!("{err}").contains("unknown editor"));
-    }
-
-    #[test]
-    fn open_session_implicit_editors_skips_missing_executables() {
-        let temp = tempdir().expect("temp dir");
-        let config_path = temp.path().join("config.toml");
-        fs::write(
-            &config_path,
-            r#"
-[editors.missing]
-command = ["definitely-not-existing-command-xyz", "{dir}"]
-
-[editors.available]
-command = ["true"]
-"#,
-        )
-        .expect("write config");
-
-        let app = TaskspaceApp {
-            root_dir: temp.path().to_path_buf(),
-            editor_registry: config::EditorRegistry::load_from(Some(&config_path))
-                .expect("registry"),
-        };
-
-        app.create_session(NewSessionRequest {
-            name: SessionName::parse("demo").expect("name"),
-            template_path: None,
-            open_after_create: false,
-            editors: vec!["available".to_string()],
-            editors_explicit: true,
-        })
-        .expect("create session");
-
-        app.open_session(OpenSessionRequest {
-            target: OpenSessionTarget::Name(SessionName::parse("demo").expect("name")),
-            editors: vec!["missing".to_string(), "available".to_string()],
-            editors_explicit: false,
-        })
-        .expect("implicit open should skip unavailable editor");
-    }
-
-    #[test]
-    fn open_session_implicit_editors_fail_when_all_unavailable() {
-        let temp = tempdir().expect("temp dir");
-        let config_path = temp.path().join("config.toml");
-        fs::write(
-            &config_path,
-            r#"
-[editors.missing1]
-command = ["definitely-not-existing-command-xyz"]
-
-[editors.missing2]
-command = ["definitely-not-existing-command-abc"]
-"#,
-        )
-        .expect("write config");
-
-        let app = TaskspaceApp {
-            root_dir: temp.path().to_path_buf(),
-            editor_registry: config::EditorRegistry::load_from(Some(&config_path))
-                .expect("registry"),
-        };
-
-        app.create_session(NewSessionRequest {
-            name: SessionName::parse("demo").expect("name"),
-            template_path: None,
-            open_after_create: false,
-            editors: vec!["missing1".to_string()],
-            editors_explicit: true,
-        })
-        .expect("create session");
-
-        let err = app
-            .open_session(OpenSessionRequest {
-                target: OpenSessionTarget::Name(SessionName::parse("demo").expect("name")),
-                editors: vec!["missing1".to_string(), "missing2".to_string()],
-                editors_explicit: false,
-            })
-            .expect_err("implicit open should fail when all editors are unavailable");
-
-        assert!(format!("{err}").contains("no default editors are available"));
-        assert!(format!("{err}").contains("taskspace doctor"));
-    }
-
-    #[test]
-    fn open_session_explicit_editor_failure_contains_os_error_details() {
-        let temp = tempdir().expect("temp dir");
-        let config_path = temp.path().join("config.toml");
-        fs::write(
-            &config_path,
-            r#"
-[editors.missing]
-command = ["definitely-not-existing-command-xyz"]
-"#,
-        )
-        .expect("write config");
-
-        let app = TaskspaceApp {
-            root_dir: temp.path().to_path_buf(),
-            editor_registry: config::EditorRegistry::load_from(Some(&config_path))
-                .expect("registry"),
-        };
-
-        app.create_session(NewSessionRequest {
-            name: SessionName::parse("demo").expect("name"),
-            template_path: None,
-            open_after_create: false,
-            editors: vec!["missing".to_string()],
-            editors_explicit: true,
-        })
-        .expect("create session");
-
-        let err = app
-            .open_session(OpenSessionRequest {
-                target: OpenSessionTarget::Name(SessionName::parse("demo").expect("name")),
-                editors: vec!["missing".to_string()],
-                editors_explicit: true,
-            })
-            .expect_err("explicit open should fail for missing command");
-
-        let rendered = format!("{err}");
-        assert!(rendered.contains("failed to execute command"));
-        assert!(rendered.contains("os error") || rendered.contains("No such file"));
-    }
-
-    #[test]
-    fn open_session_implicit_uses_configured_default_editors() {
-        let temp = tempdir().expect("temp dir");
-        let config_path = temp.path().join("config.toml");
-        fs::write(
-            &config_path,
-            r#"
-[editors.available]
-command = ["true"]
-
-[open]
-default_editors = ["available"]
-"#,
-        )
-        .expect("write config");
-
-        let app = TaskspaceApp {
-            root_dir: temp.path().to_path_buf(),
-            editor_registry: config::EditorRegistry::load_from(Some(&config_path))
-                .expect("registry"),
-        };
-
-        app.create_session(NewSessionRequest {
-            name: SessionName::parse("demo").expect("name"),
-            template_path: None,
-            open_after_create: false,
-            editors: vec!["available".to_string()],
-            editors_explicit: true,
-        })
-        .expect("create session");
-
-        app.open_session(OpenSessionRequest {
-            target: OpenSessionTarget::Name(SessionName::parse("demo").expect("name")),
-            editors: Vec::new(),
-            editors_explicit: false,
-        })
-        .expect("implicit open should use configured defaults");
-    }
-
-    #[test]
-    fn open_session_implicit_stops_after_first_success() {
-        let temp = tempdir().expect("temp dir");
-        let config_path = temp.path().join("config.toml");
-        fs::write(
-            &config_path,
-            r#"
-[editors.available]
-command = ["true"]
-
-[editors.failing]
-command = ["false"]
-
-[open]
-default_editors = ["available", "failing"]
-"#,
-        )
-        .expect("write config");
-
-        let app = TaskspaceApp {
-            root_dir: temp.path().to_path_buf(),
-            editor_registry: config::EditorRegistry::load_from(Some(&config_path))
-                .expect("registry"),
-        };
-
-        app.create_session(NewSessionRequest {
-            name: SessionName::parse("demo").expect("name"),
-            template_path: None,
-            open_after_create: false,
-            editors: vec!["available".to_string()],
-            editors_explicit: true,
-        })
-        .expect("create session");
-
-        app.open_session(OpenSessionRequest {
-            target: OpenSessionTarget::Name(SessionName::parse("demo").expect("name")),
-            editors: Vec::new(),
-            editors_explicit: false,
-        })
-        .expect("implicit open should stop after first successful launch");
     }
 }

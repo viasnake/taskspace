@@ -1,15 +1,17 @@
 use std::path::Path;
 
+#[cfg(windows)]
+use std::path::PathBuf;
+
 use anyhow::Result;
 use taskspace_infra_fs::run_command_capture;
 
-use crate::config::EditorRegistry;
 use crate::spec;
 use crate::template::WorkspaceModel;
 use crate::validation::validate_workspace_yaml;
 use crate::{DoctorCategory, DoctorCheck, DoctorLevel, DoctorReport, TaskspaceApp};
 
-pub fn run(app: &TaskspaceApp, registry: &EditorRegistry) -> Result<DoctorReport> {
+pub fn run(app: &TaskspaceApp) -> Result<DoctorReport> {
     let mut checks = Vec::new();
 
     if app.root_dir().exists() {
@@ -36,45 +38,7 @@ pub fn run(app: &TaskspaceApp, registry: &EditorRegistry) -> Result<DoctorReport
         }
     }
 
-    // Check all editor commands from registry
-    for (name, cmd) in editor_commands_for_check(registry) {
-        let level = if command_is_available(&cmd) {
-            DoctorLevel::Ok
-        } else {
-            DoctorLevel::Warn
-        };
-        checks.push(DoctorCheck {
-            category: DoctorCategory::Command,
-            level,
-            message: format!("editor check: {} ({})", name, cmd),
-        });
-    }
-
     Ok(DoctorReport { checks })
-}
-
-fn editor_commands_for_check(registry: &EditorRegistry) -> Vec<(String, String)> {
-    let mut editors: Vec<(String, String)> = registry
-        .all_editors()
-        .filter_map(|(name, config)| {
-            config
-                .command
-                .first()
-                .map(|cmd| (name.to_string(), cmd.to_string()))
-        })
-        .collect();
-    editors.sort_unstable_by(|left, right| left.0.cmp(&right.0));
-    editors
-}
-
-fn command_is_available(command: &str) -> bool {
-    for probe in ["--version", "-V", "version"] {
-        let args = vec![probe.to_string()];
-        if run_command_capture(command, &args).is_ok() {
-            return true;
-        }
-    }
-    false
 }
 
 fn check_session(name: &str, session_dir: &Path) -> Vec<DoctorCheck> {
@@ -122,6 +86,7 @@ fn check_session(name: &str, session_dir: &Path) -> Vec<DoctorCheck> {
 
     if let Some(workspace) = workspace {
         checks.extend(check_template_metadata(name, session_dir, &workspace));
+        checks.extend(check_open_actions(name, &workspace));
     }
 
     checks
@@ -211,38 +176,78 @@ fn check_template_metadata(
     checks
 }
 
+fn check_open_actions(name: &str, workspace: &WorkspaceModel) -> Vec<DoctorCheck> {
+    let mut checks = Vec::new();
+
+    for action in &workspace.open.actions {
+        if let Some(program) = action.command.first() {
+            let level = if command_is_available(program) {
+                DoctorLevel::Ok
+            } else {
+                DoctorLevel::Warn
+            };
+            checks.push(DoctorCheck {
+                category: DoctorCategory::Command,
+                level,
+                message: format!("session '{}' open action command check: {}", name, program),
+            });
+        }
+    }
+
+    checks
+}
+
+fn command_is_available(command: &str) -> bool {
+    if command.trim().is_empty() {
+        return false;
+    }
+
+    let command_path = Path::new(command);
+    if command_path.is_absolute() || command.contains(std::path::MAIN_SEPARATOR) {
+        return command_path.is_file();
+    }
+
+    let Some(path_var) = std::env::var_os("PATH") else {
+        return false;
+    };
+
+    for dir in std::env::split_paths(&path_var) {
+        if command_exists_in_dir(&dir, command) {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn command_exists_in_dir(dir: &Path, command: &str) -> bool {
+    let candidate = dir.join(command);
+    if candidate.is_file() {
+        return true;
+    }
+
+    #[cfg(windows)]
+    {
+        let pathext = std::env::var_os("PATHEXT").unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".into());
+        let exts = pathext.to_string_lossy();
+        for ext in exts.split(';') {
+            if ext.is_empty() {
+                continue;
+            }
+            let ext = ext.trim_start_matches('.');
+            let with_ext = PathBuf::from(format!("{}.{}", candidate.display(), ext));
+            if with_ext.is_file() {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-    use tempfile::tempdir;
-
-    #[test]
-    fn editor_commands_for_check_returns_sorted_names() {
-        let temp = tempdir().expect("tempdir");
-        let config_path = temp.path().join("config.toml");
-        fs::write(
-            &config_path,
-            r#"
-[editors.zzz]
-command = ["zzz"]
-
-[editors.aaa]
-command = ["aaa"]
-"#,
-        )
-        .expect("write config");
-
-        let registry = EditorRegistry::load_from(Some(&config_path)).expect("registry");
-        let names: Vec<String> = editor_commands_for_check(&registry)
-            .into_iter()
-            .map(|(name, _)| name)
-            .collect();
-
-        let mut sorted = names.clone();
-        sorted.sort_unstable();
-        assert_eq!(names, sorted);
-    }
 
     #[test]
     fn command_is_available_reports_false_for_missing_command() {

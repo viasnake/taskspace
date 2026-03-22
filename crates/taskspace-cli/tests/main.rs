@@ -24,7 +24,7 @@ fn binary_new_and_list_work() {
 }
 
 #[test]
-fn binary_new_with_unknown_editor_succeeds_without_open() {
+fn binary_new_rejects_removed_editor_option() {
     let temp = tempdir().expect("tempdir");
     let root = temp.path().to_path_buf();
 
@@ -36,10 +36,8 @@ fn binary_new_with_unknown_editor_succeeds_without_open() {
         .arg("--editor")
         .arg("definitely-not-installed-editor-xyz")
         .assert()
-        .success()
-        .stdout(predicates::str::contains("created session"));
-
-    assert!(root.join("demo").exists());
+        .failure()
+        .stderr(predicates::str::contains("unexpected argument '--editor'"));
 }
 
 #[test]

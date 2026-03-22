@@ -34,6 +34,7 @@ pub fn resolve_workspace_model(
             created_at: Utc::now().to_rfc3339(),
             layout_version: 1,
             created_by: CreatedBy::Manual,
+            open: default_open_spec(),
             template: None,
             manifest: None,
         }),
@@ -111,6 +112,7 @@ fn resolve_workspace_model_from_template(
         created_at: Utc::now().to_rfc3339(),
         layout_version,
         created_by: CreatedBy::Template,
+        open: default_open_spec(),
         template: Some(TemplateRef {
             ref_path: template_ref_path,
             digest,
@@ -282,10 +284,29 @@ pub(crate) struct WorkspaceModel {
     pub(crate) created_at: String,
     pub(crate) layout_version: u32,
     pub(crate) created_by: CreatedBy,
+    pub(crate) open: OpenSpec,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) template: Option<TemplateRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) manifest: Option<Manifest>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct OpenSpec {
+    pub(crate) actions: Vec<OpenAction>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct OpenAction {
+    pub(crate) command: Vec<String>,
+}
+
+fn default_open_spec() -> OpenSpec {
+    OpenSpec {
+        actions: vec![OpenAction {
+            command: vec!["opencode".to_string(), "{dir}".to_string()],
+        }],
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
