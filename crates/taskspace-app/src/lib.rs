@@ -190,12 +190,13 @@ impl TaskspaceApp {
             }
         }
 
-        if failures.is_empty()
-            && !(!request.editors_explicit && skipped_unavailable.len() == request.editors.len())
-        {
+        let all_default_editors_unavailable =
+            !request.editors_explicit && skipped_unavailable.len() == request.editors.len();
+
+        if failures.is_empty() && !all_default_editors_unavailable {
             Ok(())
         } else {
-            if !request.editors_explicit && skipped_unavailable.len() == request.editors.len() {
+            if all_default_editors_unavailable {
                 return Err(anyhow!(TaskspaceError::ExternalCommand(format!(
                     "failed to open session '{}': no default editors are available (skipped: [{}])\nhint: run 'taskspace doctor' or specify --editor <name>",
                     session_name.as_str(),
