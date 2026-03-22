@@ -12,6 +12,8 @@ mod exit_code;
 mod parse;
 mod render;
 
+const DEFAULT_OPEN_EDITORS: [&str; 4] = ["vscode", "opencode", "codex", "claude"];
+
 #[derive(Parser)]
 #[command(name = "taskspace")]
 #[command(version, about = "Session-oriented workspace manager for AI coding")]
@@ -42,13 +44,13 @@ pub(crate) enum Commands {
         template: Option<String>,
         #[arg(long)]
         open: bool,
-        #[arg(long, default_value = "opencode")]
-        editor: String,
+        #[arg(long = "editor", value_delimiter = ',', num_args = 1..)]
+        editors: Vec<String>,
     },
     Open {
         name: Option<String>,
-        #[arg(long, default_value = "opencode")]
-        editor: String,
+        #[arg(long = "editor", value_delimiter = ',', num_args = 1..)]
+        editors: Vec<String>,
         #[arg(long)]
         last: bool,
     },
@@ -138,12 +140,150 @@ fn run_with_cli(cli: Cli) -> Result<Vec<String>, TaskspaceError> {
     };
     let app = TaskspaceApp::new(root).map_err(execute::map_anyhow_error)?;
     let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
     let stdin_is_terminal = stdin.is_terminal();
+    let stdout_is_terminal = stdout.is_terminal();
     let mut input = stdin.lock();
     let mut output = std::io::stderr().lock();
     let request = maybe_confirm_remove(request, stdin_is_terminal, &mut input, &mut output)?;
-    let result = execute::execute(&app, request)?;
-    Ok(render::render(result))
+    let guarded = maybe_guard_open(request, stdin_is_terminal, stdout_is_terminal)?;
+    let result = execute::execute(&app, guarded.request)?;
+    let mut lines = render::render(result);
+    lines.extend(guarded.messages);
+    Ok(lines)
+}
+
+#[derive(Debug)]
+struct GuardedRequest {
+    request: execute::CommandRequest,
+    messages: Vec<String>,
+}
+
+fn maybe_guard_open(
+    request: execute::CommandRequest,
+    stdin_is_terminal: bool,
+    stdout_is_terminal: bool,
+) -> Result<GuardedRequest, TaskspaceError> {
+    let context = OpenContext::from_env(stdin_is_terminal, stdout_is_terminal);
+    maybe_guard_open_with_context(request, context)
+}
+
+fn maybe_guard_open_with_context(
+    request: execute::CommandRequest,
+    context: OpenContext,
+) -> Result<GuardedRequest, TaskspaceError> {
+    match request {
+        execute::CommandRequest::New {
+            name,
+            template_path,
+            open_after_create,
+            editors,
+        } => {
+            let normalized_editors = normalized_editor_list(editors);
+            if !open_after_create {
+                return Ok(GuardedRequest {
+                    request: execute::CommandRequest::New {
+                        name,
+                        template_path,
+                        open_after_create,
+                        editors: normalized_editors,
+                    },
+                    messages: Vec::new(),
+                });
+            }
+
+            match context.block_reason() {
+                Some(reason) => Ok(GuardedRequest {
+                    request: execute::CommandRequest::New {
+                        name,
+                        template_path,
+                        open_after_create: false,
+                        editors: normalized_editors,
+                    },
+                    messages: vec![format!("skipped opening session: {reason}")],
+                }),
+                None => Ok(GuardedRequest {
+                    request: execute::CommandRequest::New {
+                        name,
+                        template_path,
+                        open_after_create,
+                        editors: normalized_editors,
+                    },
+                    messages: Vec::new(),
+                }),
+            }
+        }
+        execute::CommandRequest::Open { name, editors } => {
+            let normalized_editors = normalized_editor_list(editors);
+            match context.block_reason() {
+                Some(reason) => Err(TaskspaceError::Usage(format!(
+                    "cannot open session in this environment: {reason}"
+                ))),
+                None => Ok(GuardedRequest {
+                    request: execute::CommandRequest::Open {
+                        name,
+                        editors: normalized_editors,
+                    },
+                    messages: Vec::new(),
+                }),
+            }
+        }
+        other => Ok(GuardedRequest {
+            request: other,
+            messages: Vec::new(),
+        }),
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct OpenContext {
+    stdin_is_terminal: bool,
+    stdout_is_terminal: bool,
+    has_ssh: bool,
+    has_ci: bool,
+}
+
+impl OpenContext {
+    fn from_env(stdin_is_terminal: bool, stdout_is_terminal: bool) -> Self {
+        Self {
+            stdin_is_terminal,
+            stdout_is_terminal,
+            has_ssh: ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"]
+                .iter()
+                .any(|key| std::env::var_os(key).is_some()),
+            has_ci: std::env::var_os("CI").is_some(),
+        }
+    }
+
+    fn block_reason(self) -> Option<&'static str> {
+        if !self.stdin_is_terminal || !self.stdout_is_terminal {
+            return Some("requires interactive terminal (TTY)");
+        }
+        if self.has_ssh {
+            return Some("detected SSH session");
+        }
+        if self.has_ci {
+            return Some("detected CI environment");
+        }
+        None
+    }
+}
+
+fn normalized_editor_list(editors: Vec<String>) -> Vec<String> {
+    let normalized: Vec<String> = editors
+        .into_iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect();
+
+    if normalized.is_empty() {
+        return DEFAULT_OPEN_EDITORS
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect();
+    }
+
+    normalized
 }
 
 fn maybe_confirm_remove(
@@ -467,7 +607,7 @@ mod tests {
         let root = temp.path().to_path_buf();
 
         // Test all default editor variants can be specified
-        for editor in ["opencode", "codex", "claude"] {
+        for editor in ["vscode", "opencode", "codex", "claude"] {
             let name = format!("test-{}", editor);
             let out = run_with_args([
                 "taskspace",
@@ -552,37 +692,82 @@ mod tests {
     }
 
     #[test]
-    fn open_with_unknown_editor_fails_gracefully() {
-        let temp = tempdir().expect("tempdir");
-        let root = temp.path().to_path_buf();
+    fn maybe_guard_open_blocks_open_in_non_interactive_context() {
+        let request = execute::CommandRequest::Open {
+            name: Some(taskspace_core::SessionName::parse("demo").expect("name")),
+            editors: vec!["vscode".to_string()],
+        };
+        let context = OpenContext {
+            stdin_is_terminal: false,
+            stdout_is_terminal: true,
+            has_ssh: false,
+            has_ci: false,
+        };
 
-        // Create a session first
-        run_with_args([
-            "taskspace",
-            "--root",
-            root.to_str().expect("utf8"),
-            "new",
-            "test-session",
-        ])
-        .expect("create test session");
+        let err = maybe_guard_open_with_context(request, context)
+            .expect_err("open should fail without interactive TTY");
+        assert!(format!("{err}").contains("interactive terminal"));
+    }
 
-        // Test with a definitely non-existent editor
-        let err = run_with_args([
-            "taskspace",
-            "--root",
-            root.to_str().expect("utf8"),
-            "open",
-            "test-session",
-            "--editor",
-            "definitely-not-installed-editor-xyz",
-        ])
-        .expect_err("open with unknown editor should fail");
+    #[test]
+    fn maybe_guard_open_skips_new_open_in_ssh_context() {
+        let request = execute::CommandRequest::New {
+            name: taskspace_core::SessionName::parse("demo").expect("name"),
+            template_path: None,
+            open_after_create: true,
+            editors: vec!["vscode".to_string()],
+        };
+        let context = OpenContext {
+            stdin_is_terminal: true,
+            stdout_is_terminal: true,
+            has_ssh: true,
+            has_ci: false,
+        };
 
-        // Should fail with usage error (unknown editor)
-        assert!(
-            format!("{err}").contains("unknown editor"),
-            "should give unknown editor error, got: {}",
-            err
+        let guarded = maybe_guard_open_with_context(request, context)
+            .expect("new --open should be downgraded to create-only");
+        assert_eq!(guarded.messages.len(), 1);
+        assert!(guarded.messages[0].contains("detected SSH session"));
+
+        match guarded.request {
+            execute::CommandRequest::New {
+                open_after_create,
+                editors,
+                ..
+            } => {
+                assert!(!open_after_create);
+                assert_eq!(editors, vec!["vscode".to_string()]);
+            }
+            _ => panic!("expected new command"),
+        }
+    }
+
+    #[test]
+    fn normalized_editor_list_uses_defaults_when_empty() {
+        let normalized = normalized_editor_list(Vec::new());
+        assert_eq!(
+            normalized,
+            vec![
+                "vscode".to_string(),
+                "opencode".to_string(),
+                "codex".to_string(),
+                "claude".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn normalized_editor_list_trims_and_removes_empty_values() {
+        let normalized = normalized_editor_list(vec![
+            "  vscode ".to_string(),
+            "".to_string(),
+            " opencode".to_string(),
+            "   ".to_string(),
+        ]);
+
+        assert_eq!(
+            normalized,
+            vec!["vscode".to_string(), "opencode".to_string()]
         );
     }
 

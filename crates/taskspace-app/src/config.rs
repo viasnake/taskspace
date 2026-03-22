@@ -2,7 +2,7 @@
 //!
 //! Loads and merges editor configurations from:
 //! - `~/.config/taskspace/config.toml` (XDG Base Directory)
-//! - Built-in defaults (opencode, codex, claude)
+//! - Built-in defaults (vscode, opencode, codex, claude)
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -149,6 +149,7 @@ mod tests {
     fn test_load_from_none_returns_defaults() {
         let registry = EditorRegistry::load_from(None).expect("should load");
 
+        assert!(registry.get("vscode").is_some());
         assert!(registry.get("opencode").is_some());
         assert!(registry.get("codex").is_some());
         assert!(registry.get("claude").is_some());
@@ -191,6 +192,7 @@ command = ["myeditor", "{dir}"]
         let registry = EditorRegistry::load_from(None).expect("should load");
         let names: Vec<&str> = registry.editor_names().collect();
 
+        assert!(names.contains(&"vscode"));
         assert!(names.contains(&"opencode"));
         assert!(names.contains(&"codex"));
         assert!(names.contains(&"claude"));

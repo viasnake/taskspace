@@ -22,6 +22,12 @@ pub struct EditorConfig {
 pub fn default_editors() -> Vec<(&'static str, EditorConfig)> {
     vec![
         (
+            "vscode",
+            EditorConfig {
+                command: vec!["code".to_string(), "{dir}".to_string()],
+            },
+        ),
+        (
             "opencode",
             EditorConfig {
                 command: vec!["opencode".to_string(), "{dir}".to_string()],
@@ -127,6 +133,7 @@ mod tests {
     fn test_default_editors_exist() {
         let editors = default_editors();
         let names: Vec<&str> = editors.iter().map(|(name, _)| *name).collect();
+        assert!(names.contains(&"vscode"));
         assert!(names.contains(&"opencode"));
         assert!(names.contains(&"codex"));
         assert!(names.contains(&"claude"));

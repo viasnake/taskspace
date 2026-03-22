@@ -47,5 +47,11 @@ mod tests {
 
         let captured_fail = run_command_capture("false", &[]);
         assert!(captured_fail.is_err());
+
+        let spawned = spawn_command("true", &[]);
+        assert!(spawned.is_ok());
+
+        let spawned_missing = spawn_command("definitely-not-existing-command-xyz", &[]);
+        assert!(spawned_missing.is_err());
     }
 }

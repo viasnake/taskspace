@@ -30,13 +30,13 @@ mise use -g github:viasnake/taskspace@latest
 
 ```bash
 taskspace doctor
-taskspace new demo --open
+taskspace new demo --open --editor vscode --editor opencode
 ```
 
 This will:
 
 - Create a minimal session workspace
-- Open it in your editor
+- Open it in the editors you choose
 - Let you start work immediately
 
 ## Concepts
@@ -82,6 +82,7 @@ Templates may add more files and directories, but the default schema stays minim
 
 ```bash
 taskspace new <name> --open
+taskspace new <name> --open --editor vscode --editor opencode
 taskspace new <name> --template ./session-template.yaml --open
 ```
 
@@ -98,9 +99,17 @@ When a template includes `manifest.projects`, `taskspace new --template ...` clo
 
 ```bash
 taskspace open <name>
+taskspace open <name> --editor opencode --editor vscode
 taskspace open
 taskspace open --last
 ```
+
+Notes:
+
+- `--editor` can be repeated to compose multiple commands.
+- When `--editor` is omitted, taskspace uses default editors in this order: `vscode`, `opencode`, `codex`, `claude`.
+- `open` runs only in interactive local environments.
+- In non-interactive/SSH/CI environments, `taskspace open` fails fast, and `taskspace new --open` creates the session and skips opening.
 
 ### List sessions
 

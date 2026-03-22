@@ -24,7 +24,7 @@ fn binary_new_and_list_work() {
 }
 
 #[test]
-fn binary_new_with_unknown_editor_fails_fast() {
+fn binary_new_with_unknown_editor_succeeds_without_open() {
     let temp = tempdir().expect("tempdir");
     let root = temp.path().to_path_buf();
 
@@ -36,10 +36,10 @@ fn binary_new_with_unknown_editor_fails_fast() {
         .arg("--editor")
         .arg("definitely-not-installed-editor-xyz")
         .assert()
-        .failure()
-        .stderr(predicates::str::contains("unknown editor"));
+        .success()
+        .stdout(predicates::str::contains("created session"));
 
-    assert!(!root.join("demo").exists());
+    assert!(root.join("demo").exists());
 }
 
 #[test]
@@ -146,7 +146,7 @@ fn binary_list_empty_shows_message() {
 }
 
 #[test]
-fn binary_open_without_name_uses_latest_session() {
+fn binary_open_without_name_fails_in_non_interactive_mode() {
     let temp = tempdir().expect("tempdir");
     let root = temp.path().to_path_buf();
 
@@ -175,44 +175,33 @@ fn binary_open_without_name_uses_latest_session() {
     fs::write(&old_file, "old").expect("touch old");
     fs::write(&new_file, "new").expect("touch new");
 
-    // Create stub directory OUTSIDE the root to avoid being treated as a session
-    let stub_temp = tempdir().expect("stub tempdir");
-    let bin_dir = stub_temp.path().join("bin");
-    fs::create_dir_all(&bin_dir).expect("create bin dir");
-    let marker = root.join("called.txt");
-    let stub = bin_dir.join("opencode");
-    fs::write(
-        &stub,
-        format!("#!/bin/sh\nprintf '%s' \"$1\" > '{}'\n", marker.display()),
-    )
-    .expect("write stub");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&stub).expect("metadata").permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&stub, perms).expect("chmod");
-    }
-
-    let original_path = std::env::var("PATH").unwrap_or_default();
-    let path_value = format!("{}:{}", bin_dir.display(), original_path);
-
     let mut open_cmd = Command::cargo_bin("taskspace").expect("binary");
     open_cmd
-        .env("PATH", path_value)
         .arg("--root")
         .arg(root.to_str().expect("utf8"))
         .arg("open")
         .assert()
-        .success();
+        .failure()
+        .stderr(predicates::str::contains(
+            "cannot open session in this environment",
+        ));
+}
 
-    let called = fs::read_to_string(&marker).expect("read marker");
-    // For Opencode editor, the session directory is passed directly.
-    // We verify that "new" session is opened (the latest one)
-    assert!(
-        called.contains("/new") || called.ends_with("new"),
-        "expected /new in path, got: {called}"
-    );
+#[test]
+fn binary_new_open_skips_open_in_non_interactive_mode() {
+    let temp = tempdir().expect("tempdir");
+    let root = temp.path().to_path_buf();
+
+    let mut cmd = Command::cargo_bin("taskspace").expect("binary");
+    cmd.arg("--root")
+        .arg(root.to_str().expect("utf8"))
+        .arg("new")
+        .arg("demo")
+        .arg("--open")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("created session"))
+        .stdout(predicates::str::contains("skipped opening session"));
 }
 
 #[test]

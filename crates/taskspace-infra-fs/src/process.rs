@@ -30,3 +30,12 @@ pub fn run_command_capture(program: &str, args: &[String]) -> Result<String> {
 
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
+
+pub fn spawn_command(program: &str, args: &[String]) -> Result<()> {
+    let _child = Command::new(program)
+        .args(args)
+        .spawn()
+        .with_context(|| format!("failed to execute command: {program}"))?;
+
+    Ok(())
+}

@@ -14,11 +14,11 @@ pub enum CommandRequest {
         name: SessionName,
         template_path: Option<PathBuf>,
         open_after_create: bool,
-        editor: String,
+        editors: Vec<String>,
     },
     Open {
         name: Option<SessionName>,
-        editor: String,
+        editors: Vec<String>,
     },
     List,
     Remove {
@@ -54,24 +54,24 @@ pub fn execute(
             name,
             template_path,
             open_after_create,
-            editor,
+            editors,
         } => {
             let created = app
                 .create_session(NewSessionRequest {
                     name,
                     template_path,
                     open_after_create,
-                    editor,
+                    editors,
                 })
                 .map_err(map_anyhow_error)?;
             Ok(CommandResult::Created(created))
         }
-        CommandRequest::Open { name, editor } => {
+        CommandRequest::Open { name, editors } => {
             let target = match name {
                 Some(name) => OpenSessionTarget::Name(name),
                 None => OpenSessionTarget::Last,
             };
-            app.open_session(OpenSessionRequest { target, editor })
+            app.open_session(OpenSessionRequest { target, editors })
                 .map_err(map_anyhow_error)?;
             Ok(CommandResult::None)
         }

@@ -36,6 +36,9 @@ It creates one isolated workspace for one task with a minimal, explicit session 
 - `rm` is destructive; interactive terminals ask for confirmation without `--yes`, while non-interactive environments require `--yes`.
 - `rm --dry-run` lets users verify targets without deletion.
 - `open` without a name opens the latest session by directory modified time.
+- `open` launches one or more user-selected editor commands in order.
+- `open` is allowed only in interactive local environments; SSH and CI contexts are blocked.
+- `new --open` degrades safely in blocked environments by creating the session and skipping open.
 - External commands are executed with argument lists (not shell strings).
 - Session names are validated before file operations.
 - `doctor` checks structure, metadata, and command availability.
