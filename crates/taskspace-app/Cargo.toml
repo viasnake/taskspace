@@ -9,9 +9,7 @@ publish = false
 anyhow.workspace = true
 chrono.workspace = true
 home.workspace = true
-serde.workspace = true
 serde_yaml.workspace = true
-sha2.workspace = true
 taskspace-core = { path = "../taskspace-core" }
 taskspace-infra-fs = { path = "../taskspace-infra-fs" }
 

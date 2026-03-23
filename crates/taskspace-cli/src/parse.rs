@@ -1,39 +1,78 @@
-use taskspace_core::{SessionName, TaskspaceError};
+use taskspace_core::{RootAccess, RootIsolation, RootType, TaskState, TaskspaceError};
 
-use crate::Commands;
 use crate::execute::CommandRequest;
+use crate::{Commands, IsolationArg, RootTypeArg, TaskStateArg};
 
 pub fn parse_command(command: Commands) -> Result<CommandRequest, TaskspaceError> {
     match command {
-        Commands::New {
-            name,
-            template,
-            open,
-        } => Ok(CommandRequest::New {
-            name: SessionName::parse(&name)?,
-            template_path: template.map(std::path::PathBuf::from),
-            open_after_create: open,
-        }),
-        Commands::Open { name, last } => {
-            if name.is_some() && last {
+        Commands::Start { title, adapter } => Ok(CommandRequest::Start { title, adapter }),
+        Commands::Attach {
+            task,
+            path,
+            root_type,
+            role,
+            ro,
+            rw,
+            isolation,
+        } => {
+            if ro && rw {
                 return Err(TaskspaceError::Usage(
-                    "cannot use <NAME> with --last".to_string(),
+                    "cannot set both --ro and --rw".to_string(),
                 ));
             }
-            let parsed_name = name.as_deref().map(SessionName::parse).transpose()?;
-            Ok(CommandRequest::Open { name: parsed_name })
+            let access = if ro { RootAccess::Ro } else { RootAccess::Rw };
+            let root_type = map_root_type(root_type);
+            let isolation = match isolation.unwrap_or(IsolationArg::Direct) {
+                IsolationArg::Direct => RootIsolation::Direct,
+                IsolationArg::Worktree => RootIsolation::Worktree,
+                IsolationArg::Copy => RootIsolation::Copy,
+                IsolationArg::Symlink => RootIsolation::Symlink,
+                IsolationArg::Generated => RootIsolation::Generated,
+            };
+            Ok(CommandRequest::Attach {
+                task_ref: task,
+                path,
+                root_type,
+                role,
+                access,
+                isolation,
+            })
         }
+        Commands::Detach { task, root_id } => Ok(CommandRequest::Detach {
+            task_ref: task,
+            root_id,
+        }),
+        Commands::Enter { task, adapter } => Ok(CommandRequest::Enter {
+            task_ref: task,
+            adapter,
+        }),
         Commands::List => Ok(CommandRequest::List),
-        Commands::Rm { name, yes, dry_run } => Ok(CommandRequest::Remove {
-            name: SessionName::parse(&name)?,
-            yes,
-            dry_run,
-        }),
-        Commands::Archive { name } => Ok(CommandRequest::Archive {
-            name: SessionName::parse(&name)?,
-        }),
-        Commands::Doctor => Ok(CommandRequest::Doctor),
-        Commands::Completion { shell } => Ok(CommandRequest::Completion { shell }),
-        Commands::CompleteSessions => Ok(CommandRequest::CompleteSessions),
+        Commands::Show { task } => Ok(CommandRequest::Show { task_ref: task }),
+        Commands::Verify { task } => Ok(CommandRequest::Verify { task_ref: task }),
+        Commands::Finish { task, state } => {
+            let state = match state.unwrap_or(TaskStateArg::Done) {
+                TaskStateArg::Active => TaskState::Active,
+                TaskStateArg::Blocked => TaskState::Blocked,
+                TaskStateArg::Review => TaskState::Review,
+                TaskStateArg::Done => TaskState::Done,
+                TaskStateArg::Archived => TaskState::Archived,
+            };
+            Ok(CommandRequest::Finish {
+                task_ref: task,
+                state,
+            })
+        }
+        Commands::Archive { task } => Ok(CommandRequest::Archive { task_ref: task }),
+        Commands::Gc => Ok(CommandRequest::Gc),
+    }
+}
+
+fn map_root_type(arg: RootTypeArg) -> RootType {
+    match arg {
+        RootTypeArg::Git => RootType::Git,
+        RootTypeArg::Dir => RootType::Dir,
+        RootTypeArg::File => RootType::File,
+        RootTypeArg::Artifact => RootType::Artifact,
+        RootTypeArg::Scratch => RootType::Scratch,
     }
 }

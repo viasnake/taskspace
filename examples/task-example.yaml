@@ -1,0 +1,31 @@
+id: tsk_01example01
+title: "migrate auth env handling"
+slug: "migrate-auth-env-handling"
+state: active
+updated_at: "2026-03-24T12:34:56+09:00"
+entry_adapter: opencode
+roots:
+  - id: root_app
+    type: git
+    path: /home/user/src/app
+    role: source
+    access: rw
+    isolation: worktree
+  - id: root_docs
+    type: dir
+    path: /home/user/docs/runbooks
+    role: docs
+    access: ro
+    isolation: direct
+  - id: root_scratch
+    type: scratch
+    path: /home/user/.local/state/taskspace/scratch/tsk_01example01
+    role: scratch
+    access: rw
+    isolation: generated
+verify:
+  commands:
+    - cargo test --workspace
+  done_when: tests pass
+notes:
+  summary: cross-repo auth env migration

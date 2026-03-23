@@ -1,46 +1,71 @@
 use std::path::PathBuf;
 
 use taskspace_app::{
-    ArchiveSessionRequest, DoctorReport, NewSessionRequest, OpenSessionRequest, OpenSessionTarget,
-    RemoveSessionRequest, TaskspaceApp,
+    ArchiveTaskRequest, AttachRootRequest, DetachRootRequest, EnterTaskRequest, FinishTaskRequest,
+    GcResult, ShowTaskRequest, StartTaskRequest, TaskSummary, TaskspaceApp, VerifyTaskRequest,
 };
-use taskspace_core::{SessionName, TaskspaceError};
-
-use crate::SupportedShell;
+use taskspace_core::{RootAccess, RootIsolation, RootType, Task, TaskState, TaskspaceError};
 
 #[derive(Debug, Clone)]
 pub enum CommandRequest {
-    New {
-        name: SessionName,
-        template_path: Option<PathBuf>,
-        open_after_create: bool,
+    Start {
+        title: String,
+        adapter: Option<String>,
     },
-    Open {
-        name: Option<SessionName>,
+    Attach {
+        task_ref: String,
+        path: PathBuf,
+        root_type: RootType,
+        role: String,
+        access: RootAccess,
+        isolation: RootIsolation,
+    },
+    Detach {
+        task_ref: String,
+        root_id: String,
+    },
+    Enter {
+        task_ref: String,
+        adapter: Option<String>,
     },
     List,
-    Remove {
-        name: SessionName,
-        yes: bool,
-        dry_run: bool,
+    Show {
+        task_ref: String,
+    },
+    Verify {
+        task_ref: String,
+    },
+    Finish {
+        task_ref: String,
+        state: TaskState,
     },
     Archive {
-        name: SessionName,
+        task_ref: String,
     },
-    Doctor,
-    Completion {
-        shell: Option<SupportedShell>,
-    },
-    CompleteSessions,
+    Gc,
 }
 
 pub enum CommandResult {
-    None,
-    Created(PathBuf),
-    SessionList(Vec<String>),
-    Removed { name: String, dry_run: bool },
-    Archived(PathBuf),
-    Doctor(DoctorReport),
+    Started(Task),
+    Attached {
+        root_id: String,
+        warnings: Vec<String>,
+    },
+    Detached,
+    Entered {
+        adapter: String,
+        cwd: PathBuf,
+        task_id: String,
+    },
+    TaskList(Vec<TaskSummary>),
+    TaskDetail(Task),
+    Verified {
+        task_id: String,
+        ran: Vec<String>,
+    },
+    Finished(TaskState),
+    Archived,
+    Gc(GcResult),
 }
 
 pub fn execute(
@@ -48,58 +73,90 @@ pub fn execute(
     command: CommandRequest,
 ) -> Result<CommandResult, TaskspaceError> {
     match command {
-        CommandRequest::New {
-            name,
-            template_path,
-            open_after_create,
-        } => {
-            let created = app
-                .create_session(NewSessionRequest {
-                    name,
-                    template_path,
-                    open_after_create,
+        CommandRequest::Start { title, adapter } => {
+            let task = app
+                .start_task(StartTaskRequest {
+                    title,
+                    entry_adapter: adapter,
                 })
                 .map_err(map_anyhow_error)?;
-            Ok(CommandResult::Created(created))
+            Ok(CommandResult::Started(task))
         }
-        CommandRequest::Open { name } => {
-            let target = match name {
-                Some(name) => OpenSessionTarget::Name(name),
-                None => OpenSessionTarget::Last,
-            };
-            app.open_session(OpenSessionRequest { target })
+        CommandRequest::Attach {
+            task_ref,
+            path,
+            root_type,
+            role,
+            access,
+            isolation,
+        } => {
+            let result = app
+                .attach_root(AttachRootRequest {
+                    task_ref,
+                    root_type,
+                    path,
+                    role,
+                    access,
+                    isolation,
+                })
                 .map_err(map_anyhow_error)?;
-            Ok(CommandResult::None)
-        }
-        CommandRequest::List => {
-            let sessions = app.list_sessions().map_err(map_anyhow_error)?;
-            Ok(CommandResult::SessionList(sessions))
-        }
-        CommandRequest::Doctor => {
-            let report = app.doctor().map_err(map_anyhow_error)?;
-            Ok(CommandResult::Doctor(report))
-        }
-        CommandRequest::Remove { name, yes, dry_run } => {
-            let name_text = name.as_str().to_string();
-            app.remove_session(RemoveSessionRequest { name, yes, dry_run })
-                .map_err(map_anyhow_error)?;
-            Ok(CommandResult::Removed {
-                name: name_text,
-                dry_run,
+            Ok(CommandResult::Attached {
+                root_id: result.root_id,
+                warnings: result.warnings,
             })
         }
-        CommandRequest::Archive { name } => {
-            let archived = app
-                .archive_session(ArchiveSessionRequest { name })
+        CommandRequest::Detach { task_ref, root_id } => {
+            app.detach_root(DetachRootRequest { task_ref, root_id })
                 .map_err(map_anyhow_error)?;
-            Ok(CommandResult::Archived(archived))
+            Ok(CommandResult::Detached)
         }
-        CommandRequest::Completion { .. } => Err(TaskspaceError::Internal(
-            "completion command should be handled before command execution".to_string(),
-        )),
-        CommandRequest::CompleteSessions => Err(TaskspaceError::Internal(
-            "complete-sessions command should be handled before command execution".to_string(),
-        )),
+        CommandRequest::Enter { task_ref, adapter } => {
+            let result = app
+                .enter_task(EnterTaskRequest { task_ref, adapter })
+                .map_err(map_anyhow_error)?;
+            Ok(CommandResult::Entered {
+                adapter: result.adapter,
+                cwd: result.cwd,
+                task_id: result.task_id,
+            })
+        }
+        CommandRequest::List => {
+            let tasks = app.list_tasks().map_err(map_anyhow_error)?;
+            Ok(CommandResult::TaskList(tasks))
+        }
+        CommandRequest::Show { task_ref } => {
+            let task = app
+                .show_task(ShowTaskRequest { task_ref })
+                .map_err(map_anyhow_error)?;
+            Ok(CommandResult::TaskDetail(task))
+        }
+        CommandRequest::Verify { task_ref } => {
+            let result = app
+                .verify_task(VerifyTaskRequest { task_ref })
+                .map_err(map_anyhow_error)?;
+            Ok(CommandResult::Verified {
+                task_id: result.task_id,
+                ran: result.ran,
+            })
+        }
+        CommandRequest::Finish { task_ref, state } => {
+            let state = app
+                .finish_task(FinishTaskRequest {
+                    task_ref,
+                    target_state: state,
+                })
+                .map_err(map_anyhow_error)?;
+            Ok(CommandResult::Finished(state))
+        }
+        CommandRequest::Archive { task_ref } => {
+            app.archive_task(ArchiveTaskRequest { task_ref })
+                .map_err(map_anyhow_error)?;
+            Ok(CommandResult::Archived)
+        }
+        CommandRequest::Gc => {
+            let result = app.gc().map_err(map_anyhow_error)?;
+            Ok(CommandResult::Gc(result))
+        }
     }
 }
 

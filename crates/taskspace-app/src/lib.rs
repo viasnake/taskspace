@@ -1,534 +1,725 @@
-mod doctor;
-mod paths;
-mod repo_import;
-mod spec;
-mod template;
-mod validation;
-
-use std::cmp::Ordering;
+use std::collections::HashSet;
+use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, anyhow};
 use chrono::Utc;
-use taskspace_core::{SessionName, TaskspaceError};
-use taskspace_infra_fs::{
-    create_dir, list_directories, list_directories_with_modified, move_dir, remove_dir_all,
-    run_command,
+use taskspace_core::{
+    Root, RootAccess, RootIsolation, RootType, Task, TaskId, TaskState, TaskspaceError, VerifySpec,
 };
+use taskspace_infra_fs::{create_dir, list_directories, remove_dir_all, run_command};
+
+const DEFAULT_ADAPTER: &str = "opencode";
 
 #[derive(Debug, Clone)]
 pub struct TaskspaceApp {
-    root_dir: PathBuf,
+    state_root: PathBuf,
 }
 
 #[derive(Debug, Clone)]
-pub struct NewSessionRequest {
-    pub name: SessionName,
-    pub template_path: Option<PathBuf>,
-    pub open_after_create: bool,
+pub struct StartTaskRequest {
+    pub title: String,
+    pub entry_adapter: Option<String>,
 }
 
 #[derive(Debug, Clone)]
-pub struct OpenSessionRequest {
-    pub target: OpenSessionTarget,
+pub struct AttachRootRequest {
+    pub task_ref: String,
+    pub root_type: RootType,
+    pub path: PathBuf,
+    pub role: String,
+    pub access: RootAccess,
+    pub isolation: RootIsolation,
 }
 
 #[derive(Debug, Clone)]
-pub enum OpenSessionTarget {
-    Name(SessionName),
-    Last,
+pub struct DetachRootRequest {
+    pub task_ref: String,
+    pub root_id: String,
 }
 
 #[derive(Debug, Clone)]
-pub struct RemoveSessionRequest {
-    pub name: SessionName,
-    pub yes: bool,
-    pub dry_run: bool,
+pub struct EnterTaskRequest {
+    pub task_ref: String,
+    pub adapter: Option<String>,
 }
 
 #[derive(Debug, Clone)]
-pub struct ArchiveSessionRequest {
-    pub name: SessionName,
+pub struct VerifyTaskRequest {
+    pub task_ref: String,
 }
 
 #[derive(Debug, Clone)]
-pub struct DoctorReport {
-    pub checks: Vec<DoctorCheck>,
+pub struct FinishTaskRequest {
+    pub task_ref: String,
+    pub target_state: TaskState,
 }
 
 #[derive(Debug, Clone)]
-pub struct DoctorCheck {
-    pub category: DoctorCategory,
-    pub level: DoctorLevel,
-    pub message: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DoctorCategory {
-    Filesystem,
-    Session,
-    Command,
+pub struct ArchiveTaskRequest {
+    pub task_ref: String,
 }
 
 #[derive(Debug, Clone)]
-pub enum DoctorLevel {
-    Ok,
-    Warn,
-    Fail,
+pub struct ShowTaskRequest {
+    pub task_ref: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct TaskSummary {
+    pub id: String,
+    pub title: String,
+    pub state: TaskState,
+    pub roots_count: usize,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct AttachRootResult {
+    pub root_id: String,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EnterTaskResult {
+    pub adapter: String,
+    pub cwd: PathBuf,
+    pub task_id: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct VerifyTaskResult {
+    pub task_id: String,
+    pub ran: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct GcResult {
+    pub removed: Vec<PathBuf>,
 }
 
 impl TaskspaceApp {
-    pub fn new(root_dir: Option<PathBuf>) -> Result<Self> {
-        let resolved = match root_dir {
-            Some(path) => path,
-            None => paths::default_sessions_root()?,
+    pub fn new(state_root: Option<PathBuf>) -> Result<Self> {
+        Ok(Self {
+            state_root: state_root.unwrap_or(default_state_root()?),
+        })
+    }
+
+    pub fn state_root(&self) -> &Path {
+        &self.state_root
+    }
+
+    pub fn start_task(&self, request: StartTaskRequest) -> Result<Task> {
+        if request.title.trim().is_empty() {
+            return Err(anyhow!(TaskspaceError::Usage(
+                "task title cannot be empty".to_string()
+            )));
+        }
+
+        ensure_layout(&self.state_root)?;
+
+        let id = new_task_id()?;
+        let task_id = TaskId::parse(&id)?;
+        let now = Utc::now().to_rfc3339();
+        let scratch_path = self.scratch_dir().join(task_id.as_str());
+        create_dir(&scratch_path).map_err(map_infra_error)?;
+
+        let task = Task {
+            id: task_id,
+            title: request.title.clone(),
+            slug: slugify(&request.title),
+            state: TaskState::Active,
+            updated_at: now,
+            entry_adapter: request
+                .entry_adapter
+                .unwrap_or_else(|| DEFAULT_ADAPTER.to_string()),
+            roots: vec![Root {
+                id: "root_scratch".to_string(),
+                root_type: RootType::Scratch,
+                path: scratch_path.display().to_string(),
+                role: "scratch".to_string(),
+                access: RootAccess::Rw,
+                isolation: RootIsolation::Generated,
+                branch: None,
+                base_branch: None,
+                include: Vec::new(),
+                exclude: Vec::new(),
+            }],
+            verify: VerifySpec::default(),
+            notes: Default::default(),
         };
-        Ok(Self { root_dir: resolved })
+        task.validate()?;
+        self.save_task(&task)?;
+        Ok(task)
     }
 
-    pub fn root_dir(&self) -> &Path {
-        &self.root_dir
+    pub fn list_tasks(&self) -> Result<Vec<TaskSummary>> {
+        ensure_layout(&self.state_root)?;
+        let mut out = Vec::new();
+        for entry in list_directories(&self.registry_tasks_dir()).map_err(map_infra_error)? {
+            let task = self.load_task_by_id(entry.as_str())?;
+            out.push(TaskSummary {
+                id: task.id.as_str().to_string(),
+                title: task.title,
+                state: task.state,
+                roots_count: task.roots.len(),
+                updated_at: task.updated_at,
+            });
+        }
+        out.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        Ok(out)
     }
 
-    pub fn create_session(&self, request: NewSessionRequest) -> Result<PathBuf> {
-        create_dir(&self.root_dir).map_err(map_infra_error)?;
+    pub fn show_task(&self, request: ShowTaskRequest) -> Result<Task> {
+        let task = self.load_task_from_ref(request.task_ref.as_str())?;
+        Ok(task)
+    }
 
-        let session_dir = self.root_dir.join(request.name.as_str());
-        if session_dir.exists() {
-            return Err(anyhow!(TaskspaceError::Conflict(format!(
-                "session '{}' already exists",
-                request.name.as_str()
+    pub fn attach_root(&self, request: AttachRootRequest) -> Result<AttachRootResult> {
+        let mut task = self.load_task_from_ref(request.task_ref.as_str())?;
+        let canonical = fs::canonicalize(&request.path).unwrap_or(request.path.clone());
+        if !canonical.exists() {
+            return Err(anyhow!(TaskspaceError::NotFound(format!(
+                "root path does not exist: {}",
+                canonical.display()
             ))));
         }
 
-        create_dir(&session_dir).map_err(map_infra_error)?;
-        if let Err(err) = (|| -> Result<()> {
-            template::create_base_structure(&session_dir)?;
-            let mut workspace = template::resolve_workspace_model(
-                request.name.as_str(),
-                request.template_path.as_deref(),
-            )?;
-            if let Some(manifest) = &mut workspace.manifest {
-                repo_import::clone_manifest_projects(&session_dir, manifest)?;
-            }
-            template::write_templates(&session_dir, &workspace)?;
-            Ok(())
-        })() {
-            if let Err(cleanup_err) = remove_dir_all(&session_dir).map_err(map_infra_error) {
-                return Err(anyhow!(TaskspaceError::Io(format!(
-                    "failed to rollback session directory: {cleanup_err}; original error: {err}"
+        let root_id = next_root_id(&task.roots);
+        let root = Root {
+            id: root_id.clone(),
+            root_type: request.root_type,
+            path: canonical.display().to_string(),
+            role: request.role,
+            access: request.access,
+            isolation: request.isolation,
+            branch: None,
+            base_branch: None,
+            include: Vec::new(),
+            exclude: Vec::new(),
+        };
+        root.validate()?;
+        task.roots.push(root);
+        task.updated_at = Utc::now().to_rfc3339();
+
+        let warnings = self.collect_rw_direct_warnings(&task)?;
+        self.save_task(&task)?;
+        Ok(AttachRootResult { root_id, warnings })
+    }
+
+    pub fn detach_root(&self, request: DetachRootRequest) -> Result<()> {
+        let mut task = self.load_task_from_ref(request.task_ref.as_str())?;
+        let before = task.roots.len();
+        task.roots.retain(|root| root.id != request.root_id);
+        if task.roots.len() == before {
+            return Err(anyhow!(TaskspaceError::NotFound(format!(
+                "root id not found: {}",
+                request.root_id
+            ))));
+        }
+        task.updated_at = Utc::now().to_rfc3339();
+        self.save_task(&task)
+    }
+
+    pub fn verify_task(&self, request: VerifyTaskRequest) -> Result<VerifyTaskResult> {
+        let task = self.load_task_from_ref(request.task_ref.as_str())?;
+        let cwd = self.resolve_default_cwd(&task)?;
+        let mut ran = Vec::new();
+        for command in &task.verify.commands {
+            let (program, args) = parse_verify_command(command)?;
+            let status = Command::new(program)
+                .args(args)
+                .current_dir(&cwd)
+                .status()
+                .map_err(|err| {
+                    anyhow!(TaskspaceError::ExternalCommand(format!(
+                        "failed to execute verify command '{}': {}",
+                        command, err
+                    )))
+                })?;
+            if !status.success() {
+                return Err(anyhow!(TaskspaceError::ExternalCommand(format!(
+                    "verify command failed: '{}' (status: {})",
+                    command, status
                 ))));
             }
-            return Err(err);
+            ran.push(command.clone());
         }
-
-        if request.open_after_create {
-            self.open_session(OpenSessionRequest {
-                target: OpenSessionTarget::Name(request.name),
-            })?;
-        }
-
-        Ok(session_dir)
+        Ok(VerifyTaskResult {
+            task_id: task.id.as_str().to_string(),
+            ran,
+        })
     }
 
-    pub fn list_sessions(&self) -> Result<Vec<String>> {
-        let sessions = list_directories(&self.root_dir).map_err(map_infra_error)?;
-        Ok(sessions
-            .into_iter()
-            .filter(|name| is_visible_session_name(name))
-            .collect())
+    pub fn enter_task(&self, request: EnterTaskRequest) -> Result<EnterTaskResult> {
+        let task = self.load_task_from_ref(request.task_ref.as_str())?;
+        let adapter = request
+            .adapter
+            .unwrap_or_else(|| task.entry_adapter.clone());
+        let view_dir = self.prepare_synthesized_view(&task)?;
+        launch_adapter(adapter.as_str(), &view_dir)?;
+
+        Ok(EnterTaskResult {
+            adapter,
+            cwd: view_dir,
+            task_id: task.id.as_str().to_string(),
+        })
     }
 
-    pub fn open_session(&self, request: OpenSessionRequest) -> Result<()> {
-        let session_name = match request.target {
-            OpenSessionTarget::Name(name) => name,
-            OpenSessionTarget::Last => self.find_latest_session_name()?.ok_or_else(|| {
-                anyhow!(TaskspaceError::NotFound(
-                    "no session specified and no recent session found".to_string()
-                ))
-            })?,
-        };
-
-        let session_dir = self.root_dir.join(session_name.as_str());
-        if !session_dir.exists() {
-            return Err(anyhow!(TaskspaceError::NotFound(format!(
-                "session '{}' does not exist",
-                session_name.as_str()
+    pub fn finish_task(&self, request: FinishTaskRequest) -> Result<TaskState> {
+        let mut task = self.load_task_from_ref(request.task_ref.as_str())?;
+        if !task.state.can_transition_to(request.target_state) {
+            return Err(anyhow!(TaskspaceError::Conflict(format!(
+                "cannot transition task from {:?} to {:?}",
+                task.state, request.target_state
             ))));
         }
+        task.state = request.target_state;
+        task.updated_at = Utc::now().to_rfc3339();
+        self.save_task(&task)?;
+        Ok(task.state)
+    }
 
-        let workspace = validation::validate_workspace_yaml(
-            &session_dir.join("workspace.yaml"),
-            session_name.as_str(),
-        )?;
+    pub fn archive_task(&self, request: ArchiveTaskRequest) -> Result<()> {
+        let mut task = self.load_task_from_ref(request.task_ref.as_str())?;
+        if !task.state.can_transition_to(TaskState::Archived) {
+            return Err(anyhow!(TaskspaceError::Conflict(format!(
+                "cannot archive task from state {:?}",
+                task.state
+            ))));
+        }
+        task.state = TaskState::Archived;
+        task.updated_at = Utc::now().to_rfc3339();
+        self.save_task(&task)
+    }
 
-        let mut failures = Vec::new();
-        for (index, action) in workspace.open.actions.iter().enumerate() {
-            if let Err(err) = launch_open_action(&action.command, &session_dir) {
-                failures.push(format!("action {}: {err:#}", index + 1));
+    pub fn gc(&self) -> Result<GcResult> {
+        ensure_layout(&self.state_root)?;
+        let mut active_ids = HashSet::new();
+        for summary in self.list_tasks()? {
+            active_ids.insert(summary.id);
+        }
+
+        let mut removed = Vec::new();
+        for name in list_directories(&self.scratch_dir()).map_err(map_infra_error)? {
+            if !active_ids.contains(&name) {
+                let path = self.scratch_dir().join(&name);
+                remove_dir_all(&path).map_err(map_infra_error)?;
+                removed.push(path);
+            }
+        }
+        for name in list_directories(&self.views_dir()).map_err(map_infra_error)? {
+            if !active_ids.contains(&name) {
+                let path = self.views_dir().join(&name);
+                remove_dir_all(&path).map_err(map_infra_error)?;
+                removed.push(path);
             }
         }
 
-        if failures.is_empty() {
-            return Ok(());
+        Ok(GcResult { removed })
+    }
+
+    fn collect_rw_direct_warnings(&self, task: &Task) -> Result<Vec<String>> {
+        let mut warnings = Vec::new();
+        let summaries = self.list_tasks()?;
+        let shared_path_candidates: Vec<_> = task
+            .roots
+            .iter()
+            .filter(|root| {
+                root.access == RootAccess::Rw
+                    && root.isolation == RootIsolation::Direct
+                    && matches!(root.root_type, RootType::Git | RootType::Artifact)
+            })
+            .map(|root| root.path.clone())
+            .collect();
+
+        if shared_path_candidates.is_empty() {
+            return Ok(warnings);
         }
 
-        Err(anyhow!(TaskspaceError::ExternalCommand(format!(
-            "failed to open session '{}'\n{}",
-            session_name.as_str(),
-            failures.join("; ")
-        ))))
+        for summary in summaries {
+            if summary.id == task.id.as_str() {
+                continue;
+            }
+            let other = self.load_task_by_id(summary.id.as_str())?;
+            for root in &other.roots {
+                if root.access == RootAccess::Rw
+                    && root.isolation == RootIsolation::Direct
+                    && shared_path_candidates.contains(&root.path)
+                {
+                    warnings.push(format!(
+                        "shared rw direct root detected with task {} at {}",
+                        other.id.as_str(),
+                        root.path
+                    ));
+                }
+            }
+        }
+
+        Ok(warnings)
     }
 
-    pub fn doctor(&self) -> Result<DoctorReport> {
-        doctor::run(self)
+    fn load_task_from_ref(&self, task_ref: &str) -> Result<Task> {
+        if task_ref == "current" {
+            let current = self.resolve_current_task_id()?;
+            return self.load_task_by_id(current.as_str());
+        }
+        let task_id = TaskId::parse(task_ref)?;
+        self.load_task_by_id(task_id.as_str())
     }
 
-    pub fn archive_session(&self, request: ArchiveSessionRequest) -> Result<PathBuf> {
-        let session_dir = self.root_dir.join(request.name.as_str());
-        if !session_dir.exists() {
+    fn resolve_current_task_id(&self) -> Result<String> {
+        let tasks = self.list_tasks()?;
+        let current = tasks
+            .iter()
+            .find(|item| {
+                matches!(
+                    item.state,
+                    TaskState::Active | TaskState::Blocked | TaskState::Review
+                )
+            })
+            .or_else(|| tasks.first())
+            .ok_or_else(|| anyhow!(TaskspaceError::NotFound("no task found".to_string())))?;
+        Ok(current.id.clone())
+    }
+
+    fn load_task_by_id(&self, id: &str) -> Result<Task> {
+        let task_id = TaskId::parse(id)?;
+        let task_yaml = self.registry_tasks_dir().join(id).join("task.yaml");
+        if !task_yaml.exists() {
             return Err(anyhow!(TaskspaceError::NotFound(format!(
-                "session '{}' does not exist",
-                request.name.as_str()
+                "task '{}' does not exist",
+                id
             ))));
         }
-
-        validation::ensure_session_marker(&session_dir)?;
-        let archive_root = paths::archive_root(&self.root_dir)?;
-        create_dir(&archive_root).map_err(map_infra_error)?;
-
-        let timestamp = Utc::now().format("%Y%m%d%H%M%S").to_string();
-        let destination = archive_root.join(format!("{}-{timestamp}", request.name.as_str()));
-        if destination.exists() {
-            return Err(anyhow!(TaskspaceError::Conflict(format!(
-                "archive destination already exists: {}",
-                destination.display()
+        let raw = fs::read_to_string(&task_yaml)
+            .map_err(|err| anyhow!(TaskspaceError::Io(err.to_string())))?;
+        let task: Task = serde_yaml::from_str(&raw)
+            .map_err(|err| anyhow!(TaskspaceError::Corrupt(err.to_string())))?;
+        task.validate()?;
+        if task.id.as_str() != task_id.as_str() {
+            return Err(anyhow!(TaskspaceError::Corrupt(format!(
+                "task id mismatch in registry entry: dir={} file={}",
+                task_id.as_str(),
+                task.id.as_str()
             ))));
         }
-
-        move_dir(&session_dir, &destination).map_err(map_infra_error)?;
-        Ok(destination)
+        Ok(task)
     }
 
-    pub fn remove_session(&self, request: RemoveSessionRequest) -> Result<()> {
-        let session_dir = self.root_dir.join(request.name.as_str());
-        if !session_dir.exists() {
-            return Err(anyhow!(TaskspaceError::NotFound(format!(
-                "session '{}' does not exist",
-                request.name.as_str()
-            ))));
+    fn save_task(&self, task: &Task) -> Result<()> {
+        task.validate()?;
+        let task_dir = self.registry_tasks_dir().join(task.id.as_str());
+        create_dir(&task_dir).map_err(map_infra_error)?;
+        let yaml = serde_yaml::to_string(task)
+            .map_err(|err| anyhow!(TaskspaceError::Internal(err.to_string())))?;
+        let temp_path = task_dir.join("task.yaml.tmp");
+        fs::write(&temp_path, yaml).map_err(|err| anyhow!(TaskspaceError::Io(err.to_string())))?;
+        fs::rename(temp_path, task_dir.join("task.yaml"))
+            .map_err(|err| anyhow!(TaskspaceError::Io(err.to_string())))
+            .map(|_| ())
+    }
+
+    fn resolve_default_cwd(&self, task: &Task) -> Result<PathBuf> {
+        for root in &task.roots {
+            if matches!(root.root_type, RootType::Git | RootType::Dir)
+                && root.access == RootAccess::Rw
+            {
+                return Ok(PathBuf::from(&root.path));
+            }
         }
-
-        validation::ensure_session_marker(&session_dir)?;
-
-        if request.dry_run {
-            return Ok(());
+        for root in &task.roots {
+            let path = PathBuf::from(&root.path);
+            if path.is_dir() {
+                return Ok(path);
+            }
         }
-        if !request.yes {
-            return Err(anyhow!(TaskspaceError::Usage(format!(
-                "refusing to remove session '{}' without --yes\nhint: rerun with: taskspace rm {} --yes",
-                request.name.as_str(),
-                request.name.as_str()
-            ))));
+        Err(anyhow!(TaskspaceError::NotFound(
+            "no suitable working directory found for task".to_string(),
+        )))
+    }
+
+    fn prepare_synthesized_view(&self, task: &Task) -> Result<PathBuf> {
+        let view_dir = self.views_dir().join(task.id.as_str());
+        create_dir(&view_dir).map_err(map_infra_error)?;
+        let roots_dir = view_dir.join("roots");
+        create_dir(&roots_dir).map_err(map_infra_error)?;
+        for root in &task.roots {
+            let target = PathBuf::from(&root.path);
+            let link = roots_dir.join(&root.id);
+            if link.symlink_metadata().is_ok() {
+                continue;
+            }
+            #[cfg(unix)]
+            {
+                std::os::unix::fs::symlink(&target, &link)
+                    .map_err(|err| anyhow!(TaskspaceError::Io(err.to_string())))?;
+            }
+            #[cfg(not(unix))]
+            {
+                fs::write(&link, target.display().to_string())
+                    .map_err(|err| anyhow!(TaskspaceError::Io(err.to_string())))?;
+            }
         }
+        fs::write(view_dir.join("TASK_ID"), task.id.as_str())
+            .map_err(|err| anyhow!(TaskspaceError::Io(err.to_string())))?;
+        Ok(view_dir)
+    }
 
-        remove_dir_all(&session_dir).map_err(map_infra_error)
+    fn registry_tasks_dir(&self) -> PathBuf {
+        self.state_root.join("registry").join("tasks")
+    }
+
+    fn scratch_dir(&self) -> PathBuf {
+        self.state_root.join("scratch")
+    }
+
+    fn views_dir(&self) -> PathBuf {
+        self.state_root.join("views")
     }
 }
 
-impl TaskspaceApp {
-    fn find_latest_session_name(&self) -> Result<Option<SessionName>> {
-        let mut sessions: Vec<(SessionName, SystemTime)> =
-            list_directories_with_modified(&self.root_dir)
-                .map_err(map_infra_error)?
-                .into_iter()
-                .filter_map(|entry| {
-                    parse_visible_session_name(&entry.name).map(|name| (name, entry.modified))
-                })
-                .collect();
-
-        sessions.sort_by(|left, right| match right.1.cmp(&left.1) {
-            Ordering::Equal => left.0.as_str().cmp(right.0.as_str()),
-            non_eq => non_eq,
-        });
-
-        Ok(sessions.into_iter().next().map(|(name, _)| name))
+fn launch_adapter(adapter: &str, view_dir: &Path) -> Result<()> {
+    match adapter {
+        "opencode" => run_command("opencode", &[view_dir.display().to_string()]).map_err(|err| {
+            anyhow!(TaskspaceError::ExternalCommand(format!(
+                "failed to launch opencode: {err}"
+            )))
+        }),
+        "shell" => {
+            let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
+            let status = Command::new(shell)
+                .current_dir(view_dir)
+                .status()
+                .map_err(|err| {
+                    anyhow!(TaskspaceError::ExternalCommand(format!(
+                        "failed to launch shell: {err}"
+                    )))
+                })?;
+            if !status.success() {
+                return Err(anyhow!(TaskspaceError::ExternalCommand(format!(
+                    "shell exited with status: {}",
+                    status
+                ))));
+            }
+            Ok(())
+        }
+        _ => Err(anyhow!(TaskspaceError::Usage(format!(
+            "unsupported adapter: {}",
+            adapter
+        )))),
     }
 }
 
-fn is_visible_session_name(name: &str) -> bool {
-    !name.starts_with('.') && SessionName::parse(name).is_ok()
+fn parse_verify_command(command: &str) -> Result<(&str, Vec<&str>)> {
+    let mut parts = command.split_whitespace();
+    let program = parts
+        .next()
+        .ok_or_else(|| anyhow!(TaskspaceError::Usage("verify command is empty".to_string())))?;
+    if is_shell_program(program) {
+        return Err(anyhow!(TaskspaceError::Usage(format!(
+            "verify command cannot execute shell directly: {}",
+            program
+        ))));
+    }
+    let args = parts.collect::<Vec<_>>();
+    Ok((program, args))
 }
 
-fn parse_visible_session_name(name: &str) -> Option<SessionName> {
-    if name.starts_with('.') {
-        return None;
-    }
-
-    SessionName::parse(name).ok()
+fn is_shell_program(program: &str) -> bool {
+    matches!(
+        program,
+        "sh" | "bash" | "zsh" | "fish" | "cmd" | "powershell" | "pwsh"
+    )
 }
 
-fn launch_open_action(command_template: &[String], session_dir: &Path) -> Result<()> {
-    if command_template.is_empty() {
-        return Err(anyhow!(TaskspaceError::Usage(
-            "open action command cannot be empty".to_string()
-        )));
+fn next_root_id(roots: &[Root]) -> String {
+    let mut index = 1usize;
+    loop {
+        let candidate = format!("root_{index}");
+        if roots.iter().all(|root| root.id != candidate) {
+            return candidate;
+        }
+        index += 1;
     }
-
-    let expanded = command_template
-        .iter()
-        .map(|arg| arg.replace("{dir}", &session_dir.display().to_string()))
-        .collect::<Vec<_>>();
-    let Some((program, args)) = expanded.split_first() else {
-        return Err(anyhow!(TaskspaceError::Usage(
-            "open action command cannot be empty".to_string()
-        )));
-    };
-    if program.trim().is_empty() {
-        return Err(anyhow!(TaskspaceError::Usage(
-            "open action executable cannot be empty".to_string()
-        )));
-    }
-
-    run_command(program, args)
 }
 
-pub(crate) fn map_infra_error(err: anyhow::Error) -> anyhow::Error {
+fn ensure_layout(root: &Path) -> Result<()> {
+    create_dir(root).map_err(map_infra_error)?;
+    create_dir(&root.join("registry").join("tasks")).map_err(map_infra_error)?;
+    create_dir(&root.join("scratch")).map_err(map_infra_error)?;
+    create_dir(&root.join("cache")).map_err(map_infra_error)?;
+    create_dir(&root.join("gc")).map_err(map_infra_error)?;
+    create_dir(&root.join("views")).map_err(map_infra_error)?;
+    Ok(())
+}
+
+fn new_task_id() -> Result<String> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|err| anyhow!(TaskspaceError::Internal(err.to_string())))?;
+    Ok(format!("tsk_{:x}", now.as_nanos()))
+}
+
+fn default_state_root() -> Result<PathBuf> {
+    let home = home::home_dir()
+        .ok_or_else(|| anyhow!(TaskspaceError::Internal("cannot resolve HOME".to_string())))?;
+    Ok(home.join(".local").join("state").join("taskspace"))
+}
+
+fn slugify(title: &str) -> String {
+    let mut slug = title
+        .to_ascii_lowercase()
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+        .collect::<String>();
+    while slug.contains("--") {
+        slug = slug.replace("--", "-");
+    }
+    slug.trim_matches('-').to_string()
+}
+
+fn map_infra_error(err: anyhow::Error) -> anyhow::Error {
     anyhow!(TaskspaceError::Io(err.to_string()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-    use std::path::Path;
-    use std::process::Command;
     use tempfile::tempdir;
 
     #[test]
-    fn create_and_list_session() {
-        let temp = tempdir().expect("temp dir");
+    fn start_and_list_tasks_work() {
+        let temp = tempdir().expect("temp");
         let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
 
-        app.create_session(NewSessionRequest {
-            name: SessionName::parse("demo").expect("name"),
-            template_path: None,
-            open_after_create: false,
-        })
-        .expect("session creation");
-
-        let sessions = app.list_sessions().expect("list sessions");
-        assert_eq!(sessions, vec!["demo".to_string()]);
-    }
-
-    #[test]
-    fn create_session_with_template_records_template_metadata() {
-        let temp = tempdir().expect("temp dir");
-        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
-        let repo = create_git_repo(temp.path(), "seed-repo");
-
-        let template_path = temp.path().join("template.yaml");
-        fs::write(
-            &template_path,
-            format!(
-                "version: 1\nmanifest:\n  projects:\n    - id: app\n      source: {}\n      revision: main\n      target: repos/app\n",
-                repo.display()
-            ),
-        )
-        .expect("write template");
-
-        app.create_session(NewSessionRequest {
-            name: SessionName::parse("demo").expect("name"),
-            template_path: Some(template_path.clone()),
-            open_after_create: false,
-        })
-        .expect("session creation");
-
-        let yaml =
-            fs::read_to_string(temp.path().join("demo/workspace.yaml")).expect("workspace yaml");
-        let value: serde_yaml::Value = serde_yaml::from_str(&yaml).expect("valid yaml");
-
-        assert_eq!(value["version"].as_u64(), Some(5));
-        assert_eq!(value["created_by"].as_str(), Some("template"));
-        let expected_ref = path_to_string(&template_path);
-        assert_eq!(
-            value["template"]["ref"].as_str(),
-            Some(expected_ref.as_str())
-        );
-        assert!(
-            value["template"]["digest"]
-                .as_str()
-                .expect("digest")
-                .starts_with("sha256:")
-        );
-        assert_eq!(value["manifest"]["projects"][0]["id"].as_str(), Some("app"));
-        assert_eq!(
-            value["open"]["actions"][0]["command"][0].as_str(),
-            Some("opencode")
-        );
-        assert!(temp.path().join("demo/repos/app/README.md").exists());
-    }
-
-    #[test]
-    fn create_session_fails_for_invalid_template_and_rolls_back() {
-        let temp = tempdir().expect("temp dir");
-        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
-
-        let template_path = temp.path().join("invalid-template.yaml");
-        fs::write(&template_path, "version: 99\n").expect("write template");
-
-        let err = app
-            .create_session(NewSessionRequest {
-                name: SessionName::parse("demo").expect("name"),
-                template_path: Some(template_path),
-                open_after_create: false,
+        let created = app
+            .start_task(StartTaskRequest {
+                title: "demo task".to_string(),
+                entry_adapter: None,
             })
-            .expect_err("invalid template should fail");
+            .expect("start");
+        assert_eq!(created.state, TaskState::Active);
 
-        assert!(format!("{err}").contains("unsupported template schema version"));
-        assert!(!temp.path().join("demo").exists());
+        let list = app.list_tasks().expect("list");
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].title, "demo task");
     }
 
     #[test]
-    fn create_session_rolls_back_when_clone_fails() {
-        let temp = tempdir().expect("temp dir");
+    fn attach_and_detach_root_work() {
+        let temp = tempdir().expect("temp");
         let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
+        let project = temp.path().join("project");
+        fs::create_dir_all(&project).expect("project");
 
-        let missing_repo = temp.path().join("does-not-exist");
-        let template_path = temp.path().join("template.yaml");
-        fs::write(
-            &template_path,
-            format!(
-                "version: 1\nmanifest:\n  projects:\n    - id: bad\n      source: {}\n      target: repos/bad\n",
-                missing_repo.display()
-            ),
-        )
-        .expect("write template");
-
-        let err = app
-            .create_session(NewSessionRequest {
-                name: SessionName::parse("demo").expect("name"),
-                template_path: Some(template_path),
-                open_after_create: false,
+        let task = app
+            .start_task(StartTaskRequest {
+                title: "attach task".to_string(),
+                entry_adapter: None,
             })
-            .expect_err("clone failure should rollback");
+            .expect("start");
 
-        assert!(format!("{err}").contains("failed to clone project"));
-        assert!(!temp.path().join("demo").exists());
-    }
-
-    #[test]
-    fn open_last_fails_when_no_sessions_exist() {
-        let temp = tempdir().expect("temp dir");
-        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
-
-        let err = app
-            .open_session(OpenSessionRequest {
-                target: OpenSessionTarget::Last,
+        let attached = app
+            .attach_root(AttachRootRequest {
+                task_ref: task.id.as_str().to_string(),
+                root_type: RootType::Dir,
+                path: project,
+                role: "source".to_string(),
+                access: RootAccess::Rw,
+                isolation: RootIsolation::Direct,
             })
-            .expect_err("open last without sessions should fail");
-        assert!(format!("{err}").contains("no session specified and no recent session found"));
+            .expect("attach");
+
+        app.detach_root(DetachRootRequest {
+            task_ref: task.id.as_str().to_string(),
+            root_id: attached.root_id,
+        })
+        .expect("detach");
     }
 
     #[test]
-    fn open_session_fails_when_action_command_fails() {
-        let temp = tempdir().expect("temp dir");
+    fn finish_and_archive_work() {
+        let temp = tempdir().expect("temp");
         let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
 
-        app.create_session(NewSessionRequest {
-            name: SessionName::parse("demo").expect("name"),
-            template_path: None,
-            open_after_create: false,
-        })
-        .expect("create session");
-
-        fs::write(
-            temp.path().join("demo/workspace.yaml"),
-            "version: 5\nname: demo\ncreated_at: 2026-01-01T00:00:00Z\nlayout_version: 1\ncreated_by: manual\nopen:\n  actions:\n    - command: [\"false\"]\n",
-        )
-        .expect("write workspace");
-
-        let err = app
-            .open_session(OpenSessionRequest {
-                target: OpenSessionTarget::Name(SessionName::parse("demo").expect("name")),
+        let task = app
+            .start_task(StartTaskRequest {
+                title: "finish task".to_string(),
+                entry_adapter: None,
             })
-            .expect_err("open should fail");
+            .expect("start");
 
-        assert!(format!("{err}").contains("failed to open session 'demo'"));
+        let state = app
+            .finish_task(FinishTaskRequest {
+                task_ref: task.id.as_str().to_string(),
+                target_state: TaskState::Done,
+            })
+            .expect("finish");
+        assert_eq!(state, TaskState::Done);
+
+        app.archive_task(ArchiveTaskRequest {
+            task_ref: task.id.as_str().to_string(),
+        })
+        .expect("archive");
     }
 
     #[test]
-    fn open_session_succeeds_when_actions_succeed() {
-        let temp = tempdir().expect("temp dir");
-        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
-
-        app.create_session(NewSessionRequest {
-            name: SessionName::parse("demo").expect("name"),
-            template_path: None,
-            open_after_create: false,
-        })
-        .expect("create session");
-
-        fs::write(
-            temp.path().join("demo/workspace.yaml"),
-            "version: 5\nname: demo\ncreated_at: 2026-01-01T00:00:00Z\nlayout_version: 1\ncreated_by: manual\nopen:\n  actions:\n    - command: [\"true\"]\n    - command: [\"true\"]\n",
-        )
-        .expect("write workspace");
-
-        app.open_session(OpenSessionRequest {
-            target: OpenSessionTarget::Name(SessionName::parse("demo").expect("name")),
-        })
-        .expect("open should succeed");
-    }
-
-    #[test]
-    fn launch_open_action_expands_dir_placeholder() {
-        let temp = tempdir().expect("temp dir");
-        let marker = temp.path().join("ran.txt");
-        let command = vec![
-            "sh".to_string(),
-            "-c".to_string(),
-            "test -d \"$1\" && touch \"$1/ran.txt\"".to_string(),
-            "sh".to_string(),
-            "{dir}".to_string(),
+    fn next_root_id_skips_existing_suffixes() {
+        let roots = vec![
+            Root {
+                id: "root_1".to_string(),
+                root_type: RootType::Dir,
+                path: "/tmp/a".to_string(),
+                role: "source".to_string(),
+                access: RootAccess::Rw,
+                isolation: RootIsolation::Direct,
+                branch: None,
+                base_branch: None,
+                include: Vec::new(),
+                exclude: Vec::new(),
+            },
+            Root {
+                id: "root_3".to_string(),
+                root_type: RootType::Dir,
+                path: "/tmp/b".to_string(),
+                role: "docs".to_string(),
+                access: RootAccess::Ro,
+                isolation: RootIsolation::Direct,
+                branch: None,
+                base_branch: None,
+                include: Vec::new(),
+                exclude: Vec::new(),
+            },
         ];
 
-        launch_open_action(&command, temp.path()).expect("open action should run");
-        assert!(marker.exists());
+        assert_eq!(next_root_id(&roots), "root_2");
     }
 
-    fn path_to_string(path: &Path) -> String {
-        path.display().to_string()
+    #[test]
+    fn show_task_rejects_traversal_task_ref() {
+        let temp = tempdir().expect("temp");
+        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
+
+        let err = app
+            .show_task(ShowTaskRequest {
+                task_ref: "../bad".to_string(),
+            })
+            .expect_err("must reject traversal");
+        assert!(format!("{err}").contains("task id"));
     }
 
-    fn create_git_repo(base: &Path, name: &str) -> std::path::PathBuf {
-        let repo = base.join(name);
-        fs::create_dir_all(&repo).expect("create repo dir");
-        run_git(&repo, &["init", "-b", "main"]);
-        fs::write(repo.join("README.md"), "seed repo\n").expect("write readme");
-        run_git(&repo, &["add", "README.md"]);
-        run_git(
-            &repo,
-            &[
-                "-c",
-                "user.name=taskspace",
-                "-c",
-                "user.email=taskspace@example.com",
-                "commit",
-                "-m",
-                "initial",
-            ],
-        );
-        repo
+    #[test]
+    fn parse_verify_command_rejects_empty() {
+        let err = parse_verify_command("   ").expect_err("empty should fail");
+        assert!(format!("{err}").contains("verify command is empty"));
     }
 
-    fn run_git(repo: &Path, args: &[&str]) {
-        let status = Command::new("git")
-            .args(args)
-            .current_dir(repo)
-            .status()
-            .expect("run git");
-        assert!(status.success(), "git command failed: {:?}", args);
+    #[test]
+    fn parse_verify_command_rejects_shell_programs() {
+        let err = parse_verify_command("sh -c ls").expect_err("shell should fail");
+        assert!(format!("{err}").contains("cannot execute shell directly"));
     }
 }

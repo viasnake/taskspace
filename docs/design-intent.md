@@ -2,63 +2,34 @@
 
 ## What this tool is
 
-taskspace is a session-oriented workspace manager for AI coding.
-It creates one isolated workspace for one task with a minimal, explicit session schema.
+taskspace is a task-oriented multi-root workspace manager for AI coding.
+It treats a task as the primary execution unit and resolves workspace roots before entering an AI client.
 
-## What v1 must guarantee
+## What v0.5.0 must guarantee
 
-- One task maps to one session directory.
-- AI entrypoint, metadata, and working area are always present.
-- One session structure can be recreated consistently.
-- `taskspace new --open` starts work immediately.
-- `taskspace new --template <local-yaml>` can clone manifest projects and persist reproducibility metadata.
-- The behavior is agent-agnostic (OpenCode, Claude Code, Gemini CLI, etc.).
+- Task-first lifecycle with explicit states (`active`, `blocked`, `review`, `done`, `archived`).
+- Multi-root task model (`git`, `dir`, `file`, `artifact`, `scratch`).
+- Fixed local registry and scratch locations under `~/.local/state/taskspace/`.
+- `enter` resolves workspace context and launches adapter in one step.
+- Verification remains lightweight but first-class.
 
-## What v1 intentionally excludes
+## What v0.5.0 intentionally excludes
 
-- dotfiles integration
-- secrets management
-- remote execution
-- DevContainer integration
-- plugin extension framework
-
-## Why the structure is this way
-
-- `~/taskspace/<session>` is the active work area (session directories are directly under the taskspace root).
-- `~/taskspace/.archive/` stores archived sessions to keep deletion reversible by default.
-- `AGENTS.md` is the AI entrypoint.
-- `repos/` is a workspace area for project checkouts created from template manifest entries.
-- `workspace.yaml` stores reproducibility metadata (template reference, manifest).
-- Additional helper files are created on demand by user or AI.
-
-## Safety and operational rules
-
-- `rm` is destructive; interactive terminals ask for confirmation without `--yes`, while non-interactive environments require `--yes`.
-- `rm --dry-run` lets users verify targets without deletion.
-- `open` without a name opens the latest session by directory modified time.
-- `open` launches commands declared in each session's `workspace.yaml` (`open.actions`) in order.
-- `open` is allowed only in interactive local environments; SSH and CI contexts are blocked.
-- `new --open` degrades safely in blocked environments by creating the session and skipping open.
-- External commands are executed with argument lists (not shell strings).
-- Session names are validated before file operations.
-- `doctor` checks structure, metadata, and command availability.
+- backward compatibility with old session layout/commands
+- migration from old workspace schema
+- policy engine and orchestration control plane
+- audit and RBAC subsystems
 
 ## Stable contracts
 
-- CLI commands are stable: `new`, `open`, `list`, `rm`, `archive`, `doctor`.
-- Command aliases are supported: `remove` for `rm`, `ls` for `list`.
-- Version flags are supported: `-v`, `-V`, `--version`.
-- `workspace.yaml` includes session metadata with a schema `version`.
-- Exit codes are mapped by error category.
+- Public CLI commands: `start`, `attach`, `detach`, `enter`, `list`, `show`, `verify`, `finish`, `archive`, `gc`.
+- `current` task selector resolves to the latest active task.
+- OpenCode is the first-priority adapter, while core remains adapter-agnostic.
+- Exit codes map to `TaskspaceError` categories.
 
 ## Implementation boundaries
 
-- `taskspace-core`: domain types and error categories.
-- `taskspace-app`: command use cases.
-- `taskspace-infra-fs`: filesystem and process execution.
-- `taskspace-cli`: argument parsing and terminal output.
-
-## Change policy
-
-This v1 rewrite intentionally resets session schema compatibility.
-Future schema changes should increment version and provide explicit migration guidance.
+- `taskspace-core`: task model, root model, lifecycle and errors.
+- `taskspace-app`: task registry lifecycle, resolver flow, verification and adapter entry.
+- `taskspace-infra-fs`: filesystem and process execution helpers.
+- `taskspace-cli`: command parsing, execution routing and output rendering.
