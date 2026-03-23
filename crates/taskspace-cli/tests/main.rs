@@ -125,3 +125,38 @@ fn binary_finish_archive_and_gc_work() {
         .assert()
         .success();
 }
+
+#[test]
+fn binary_completion_outputs_script() {
+    let mut completion = Command::cargo_bin("taskspace").expect("binary");
+    completion
+        .arg("completion")
+        .arg("bash")
+        .assert()
+        .success()
+        .stdout(contains("__complete-tasks"));
+}
+
+#[test]
+fn binary_complete_tasks_lists_task_ids() {
+    let temp = tempdir().expect("tempdir");
+    let root = temp.path().to_path_buf();
+
+    let mut start = Command::cargo_bin("taskspace").expect("binary");
+    start
+        .arg("--root")
+        .arg(root.to_str().expect("utf8"))
+        .arg("start")
+        .arg("completion task")
+        .assert()
+        .success();
+
+    let mut complete = Command::cargo_bin("taskspace").expect("binary");
+    complete
+        .arg("--root")
+        .arg(root.to_str().expect("utf8"))
+        .arg("__complete-tasks")
+        .assert()
+        .success()
+        .stdout(contains("tsk_"));
+}

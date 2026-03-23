@@ -12,6 +12,14 @@
 
 ## Install
 
+### mise (recommended)
+
+```bash
+mise use -g github:viasnake/taskspace@v0.5.0
+```
+
+### Homebrew (alternative)
+
 ```bash
 brew install viasnake/tap/taskspace
 ```
@@ -38,6 +46,15 @@ taskspace verify <task|current>
 taskspace finish <task|current> [--state <active|blocked|review|done|archived>]
 taskspace archive <task|current>
 taskspace gc
+taskspace completion [bash|zsh|fish]
+```
+
+## Shell Completion
+
+```bash
+taskspace completion bash > ~/.local/share/bash-completion/completions/taskspace
+taskspace completion zsh > ~/.local/share/zsh/site-functions/_taskspace
+taskspace completion fish > ~/.config/fish/completions/taskspace.fish
 ```
 
 ## Development

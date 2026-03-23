@@ -64,6 +64,9 @@ pub fn parse_command(command: Commands) -> Result<CommandRequest, TaskspaceError
         }
         Commands::Archive { task } => Ok(CommandRequest::Archive { task_ref: task }),
         Commands::Gc => Ok(CommandRequest::Gc),
+        Commands::Completion { .. } | Commands::CompleteTasks => Err(TaskspaceError::Internal(
+            "completion command should be handled before parse".to_string(),
+        )),
     }
 }
 
