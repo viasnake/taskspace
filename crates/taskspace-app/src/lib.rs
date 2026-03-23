@@ -722,4 +722,137 @@ mod tests {
         let err = parse_verify_command("sh -c ls").expect_err("shell should fail");
         assert!(format!("{err}").contains("cannot execute shell directly"));
     }
+
+    #[test]
+    fn attach_rejects_missing_path() {
+        let temp = tempdir().expect("temp");
+        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
+        let task = app
+            .start_task(StartTaskRequest {
+                title: "missing root".to_string(),
+                entry_adapter: None,
+            })
+            .expect("start");
+
+        let err = app
+            .attach_root(AttachRootRequest {
+                task_ref: task.id.as_str().to_string(),
+                root_type: RootType::Dir,
+                path: temp.path().join("nope"),
+                role: "source".to_string(),
+                access: RootAccess::Rw,
+                isolation: RootIsolation::Direct,
+            })
+            .expect_err("must fail");
+        assert!(format!("{err}").contains("root path does not exist"));
+    }
+
+    #[test]
+    fn detach_rejects_unknown_root_id() {
+        let temp = tempdir().expect("temp");
+        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
+        let task = app
+            .start_task(StartTaskRequest {
+                title: "detach root".to_string(),
+                entry_adapter: None,
+            })
+            .expect("start");
+
+        let err = app
+            .detach_root(DetachRootRequest {
+                task_ref: task.id.as_str().to_string(),
+                root_id: "root_missing".to_string(),
+            })
+            .expect_err("must fail");
+        assert!(format!("{err}").contains("root id not found"));
+    }
+
+    #[test]
+    fn finish_rejects_transition_from_archived() {
+        let temp = tempdir().expect("temp");
+        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
+        let task = app
+            .start_task(StartTaskRequest {
+                title: "archive transition".to_string(),
+                entry_adapter: None,
+            })
+            .expect("start");
+
+        app.archive_task(ArchiveTaskRequest {
+            task_ref: task.id.as_str().to_string(),
+        })
+        .expect("archive");
+
+        let err = app
+            .finish_task(FinishTaskRequest {
+                task_ref: task.id.as_str().to_string(),
+                target_state: TaskState::Active,
+            })
+            .expect_err("must fail");
+        assert!(format!("{err}").contains("cannot transition task"));
+    }
+
+    #[test]
+    fn verify_runs_commands_and_rejects_shell_wrapper() {
+        let temp = tempdir().expect("temp");
+        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
+        let mut task = app
+            .start_task(StartTaskRequest {
+                title: "verify task".to_string(),
+                entry_adapter: None,
+            })
+            .expect("start");
+
+        task.verify.commands = vec!["true".to_string()];
+        app.save_task(&task).expect("save");
+
+        let out = app
+            .verify_task(VerifyTaskRequest {
+                task_ref: task.id.as_str().to_string(),
+            })
+            .expect("verify");
+        assert_eq!(out.ran, vec!["true".to_string()]);
+
+        task.verify.commands = vec!["sh -c true".to_string()];
+        app.save_task(&task).expect("save");
+        let err = app
+            .verify_task(VerifyTaskRequest {
+                task_ref: task.id.as_str().to_string(),
+            })
+            .expect_err("must reject shell");
+        assert!(format!("{err}").contains("cannot execute shell directly"));
+    }
+
+    #[test]
+    fn gc_removes_orphan_entries() {
+        let temp = tempdir().expect("temp");
+        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
+        ensure_layout(app.state_root()).expect("layout");
+        let orphan_scratch = app.scratch_dir().join("tsk_orphan");
+        let orphan_view = app.views_dir().join("tsk_orphan");
+        fs::create_dir_all(&orphan_scratch).expect("scratch");
+        fs::create_dir_all(&orphan_view).expect("view");
+
+        let result = app.gc().expect("gc");
+        assert_eq!(result.removed.len(), 2);
+    }
+
+    #[test]
+    fn enter_rejects_unknown_adapter_without_launch() {
+        let temp = tempdir().expect("temp");
+        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
+        let task = app
+            .start_task(StartTaskRequest {
+                title: "enter task".to_string(),
+                entry_adapter: Some("unknown".to_string()),
+            })
+            .expect("start");
+        let err = app
+            .enter_task(EnterTaskRequest {
+                task_ref: task.id.as_str().to_string(),
+                adapter: Some("unknown".to_string()),
+            })
+            .expect_err("must fail");
+        assert!(format!("{err}").contains("unsupported adapter"));
+    }
 }

@@ -166,3 +166,71 @@ pub fn map_anyhow_error(err: anyhow::Error) -> TaskspaceError {
         Err(other) => TaskspaceError::Internal(other.to_string()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn execute_start_list_show_finish_archive_gc_flow() {
+        let temp = tempdir().expect("temp");
+        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
+
+        let started = execute(
+            &app,
+            CommandRequest::Start {
+                title: "demo".to_string(),
+                adapter: None,
+            },
+        )
+        .expect("start");
+        let task_id = match started {
+            CommandResult::Started(task) => task.id.as_str().to_string(),
+            _ => panic!("expected started"),
+        };
+
+        let listed = execute(&app, CommandRequest::List).expect("list");
+        match listed {
+            CommandResult::TaskList(list) => assert_eq!(list.len(), 1),
+            _ => panic!("expected list"),
+        }
+
+        let shown = execute(
+            &app,
+            CommandRequest::Show {
+                task_ref: task_id.clone(),
+            },
+        )
+        .expect("show");
+        match shown {
+            CommandResult::TaskDetail(task) => assert_eq!(task.title, "demo"),
+            _ => panic!("expected detail"),
+        }
+
+        let finished = execute(
+            &app,
+            CommandRequest::Finish {
+                task_ref: task_id.clone(),
+                state: TaskState::Done,
+            },
+        )
+        .expect("finish");
+        match finished {
+            CommandResult::Finished(state) => assert_eq!(state, TaskState::Done),
+            _ => panic!("expected finished"),
+        }
+
+        let archived = execute(
+            &app,
+            CommandRequest::Archive {
+                task_ref: task_id.clone(),
+            },
+        )
+        .expect("archive");
+        assert!(matches!(archived, CommandResult::Archived));
+
+        let gc = execute(&app, CommandRequest::Gc).expect("gc");
+        assert!(matches!(gc, CommandResult::Gc(_)));
+    }
+}

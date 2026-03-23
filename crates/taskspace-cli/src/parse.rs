@@ -76,3 +76,58 @@ fn map_root_type(arg: RootTypeArg) -> RootType {
         RootTypeArg::Scratch => RootType::Scratch,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Commands, IsolationArg, TaskStateArg};
+    use std::path::PathBuf;
+
+    #[test]
+    fn attach_rejects_both_ro_and_rw() {
+        let err = parse_command(Commands::Attach {
+            task: "current".to_string(),
+            path: PathBuf::from("/tmp"),
+            root_type: RootTypeArg::Dir,
+            role: "source".to_string(),
+            ro: true,
+            rw: true,
+            isolation: None,
+        })
+        .expect_err("should fail");
+        assert!(matches!(err, TaskspaceError::Usage(_)));
+    }
+
+    #[test]
+    fn finish_maps_state_enum() {
+        let parsed = parse_command(Commands::Finish {
+            task: "current".to_string(),
+            state: Some(TaskStateArg::Blocked),
+        })
+        .expect("parse");
+        match parsed {
+            CommandRequest::Finish { state, .. } => assert_eq!(state, TaskState::Blocked),
+            _ => panic!("expected finish"),
+        }
+    }
+
+    #[test]
+    fn attach_maps_isolation_enum() {
+        let parsed = parse_command(Commands::Attach {
+            task: "current".to_string(),
+            path: PathBuf::from("/tmp"),
+            root_type: RootTypeArg::Git,
+            role: "source".to_string(),
+            ro: false,
+            rw: false,
+            isolation: Some(IsolationArg::Worktree),
+        })
+        .expect("parse");
+        match parsed {
+            CommandRequest::Attach { isolation, .. } => {
+                assert_eq!(isolation, RootIsolation::Worktree)
+            }
+            _ => panic!("expected attach"),
+        }
+    }
+}

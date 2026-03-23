@@ -104,3 +104,66 @@ fn state_label(state: TaskState) -> &'static str {
         TaskState::Archived => "archived",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use taskspace_app::{GcResult, TaskSummary};
+    use taskspace_core::{Task, TaskId, TaskNotes, VerifySpec};
+
+    #[test]
+    fn render_list_empty_and_non_empty() {
+        let empty = render(CommandResult::TaskList(Vec::new()));
+        assert_eq!(empty, vec!["no tasks found".to_string()]);
+
+        let lines = render(CommandResult::TaskList(vec![TaskSummary {
+            id: "tsk_abc12345".to_string(),
+            title: "demo".to_string(),
+            state: TaskState::Active,
+            roots_count: 2,
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+        }]));
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("demo"));
+    }
+
+    #[test]
+    fn render_enter_and_gc() {
+        let entered = render(CommandResult::Entered {
+            adapter: "opencode".to_string(),
+            cwd: PathBuf::from("/tmp/view"),
+            task_id: "tsk_abc12345".to_string(),
+        });
+        assert!(entered[0].contains("entered task"));
+
+        let gc = render(CommandResult::Gc(GcResult {
+            removed: vec![PathBuf::from("/tmp/a")],
+        }));
+        assert!(gc[0].contains("gc removed"));
+        assert!(gc[1].contains("/tmp/a"));
+    }
+
+    #[test]
+    fn render_task_detail_and_finished() {
+        let task = Task {
+            id: TaskId::parse("tsk_abc12345").expect("id"),
+            title: "demo".to_string(),
+            slug: "demo".to_string(),
+            state: TaskState::Review,
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+            entry_adapter: "opencode".to_string(),
+            roots: Vec::new(),
+            verify: VerifySpec {
+                commands: vec!["cargo test".to_string()],
+                done_when: None,
+            },
+            notes: TaskNotes::default(),
+        };
+        let detail = render(CommandResult::TaskDetail(task));
+        assert!(detail.iter().any(|line| line.contains("state: review")));
+
+        let finished = render(CommandResult::Finished(TaskState::Done));
+        assert_eq!(finished, vec!["task state updated: done".to_string()]);
+    }
+}
