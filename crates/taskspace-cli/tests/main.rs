@@ -4,19 +4,19 @@ use std::fs;
 use tempfile::tempdir;
 
 #[test]
-fn binary_start_and_list_work() {
+fn binary_new_and_list_work() {
     let temp = tempdir().expect("tempdir");
     let root = temp.path().to_path_buf();
 
-    let mut start = Command::cargo_bin("taskspace").expect("binary");
-    start
+    let mut new_cmd = Command::cargo_bin("taskspace").expect("binary");
+    new_cmd
         .arg("--root")
         .arg(root.to_str().expect("utf8"))
-        .arg("start")
+        .arg("new")
         .arg("demo task")
         .assert()
         .success()
-        .stdout(contains("started task:"));
+        .stdout(contains("tsk_"));
 
     let mut list = Command::cargo_bin("taskspace").expect("binary");
     list.arg("--root")
@@ -28,75 +28,60 @@ fn binary_start_and_list_work() {
 }
 
 #[test]
-fn binary_attach_and_detach_work() {
+fn binary_repos_and_use_work() {
     let temp = tempdir().expect("tempdir");
     let root = temp.path().to_path_buf();
-    let source = temp.path().join("source");
-    fs::create_dir_all(&source).expect("mkdir");
+    fs::create_dir_all(root.join("repos").join("app")).expect("app");
+    fs::create_dir_all(root.join("repos").join("infra")).expect("infra");
 
-    let mut start = Command::cargo_bin("taskspace").expect("binary");
-    let output = start
+    let mut new_cmd = Command::cargo_bin("taskspace").expect("binary");
+    let output = new_cmd
         .arg("--root")
         .arg(root.to_str().expect("utf8"))
-        .arg("start")
-        .arg("attach task")
+        .arg("new")
+        .arg("auth migration")
         .output()
-        .expect("start output");
+        .expect("new output");
     assert!(output.status.success());
-    let text = String::from_utf8_lossy(&output.stdout);
-    let id = text.split_whitespace().nth(2).expect("task id").to_string();
+    let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
-    let mut attach = Command::cargo_bin("taskspace").expect("binary");
-    let attach_out = attach
+    let mut repos = Command::cargo_bin("taskspace").expect("binary");
+    repos
         .arg("--root")
         .arg(root.to_str().expect("utf8"))
-        .arg("attach")
-        .arg(&id)
-        .arg(source.to_str().expect("utf8"))
-        .arg("--type")
-        .arg("dir")
-        .arg("--role")
-        .arg("source")
-        .arg("--rw")
-        .output()
-        .expect("attach output");
-    assert!(attach_out.status.success());
-    let attach_text = String::from_utf8_lossy(&attach_out.stdout);
-    let root_id = attach_text
-        .split_whitespace()
-        .last()
-        .expect("root id")
-        .trim()
-        .to_string();
-
-    let mut detach = Command::cargo_bin("taskspace").expect("binary");
-    detach
-        .arg("--root")
-        .arg(root.to_str().expect("utf8"))
-        .arg("detach")
-        .arg(&id)
-        .arg(&root_id)
+        .arg("repos")
         .assert()
         .success()
-        .stdout(contains("detached root"));
+        .stdout(contains("app"));
+
+    let mut use_cmd = Command::cargo_bin("taskspace").expect("binary");
+    use_cmd
+        .arg("--root")
+        .arg(root.to_str().expect("utf8"))
+        .arg("use")
+        .arg(&id)
+        .arg("app")
+        .arg("infra")
+        .assert()
+        .success()
+        .stdout(contains("visible_repos: [app, infra]"));
 }
 
 #[test]
-fn binary_finish_archive_and_gc_work() {
+fn binary_finish_and_gc_work() {
     let temp = tempdir().expect("tempdir");
     let root = temp.path().to_path_buf();
 
-    let mut start = Command::cargo_bin("taskspace").expect("binary");
-    let output = start
+    let mut new_cmd = Command::cargo_bin("taskspace").expect("binary");
+    let output = new_cmd
         .arg("--root")
         .arg(root.to_str().expect("utf8"))
-        .arg("start")
+        .arg("new")
         .arg("done task")
         .output()
-        .expect("start output");
+        .expect("new output");
     assert!(output.status.success());
-    let text = String::from_utf8_lossy(&output.stdout);
-    let id = text.split_whitespace().nth(2).expect("task id").to_string();
+    let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
     let mut finish = Command::cargo_bin("taskspace").expect("binary");
     finish
@@ -108,55 +93,10 @@ fn binary_finish_archive_and_gc_work() {
         .success()
         .stdout(contains("task state updated: done"));
 
-    let mut archive = Command::cargo_bin("taskspace").expect("binary");
-    archive
-        .arg("--root")
-        .arg(root.to_str().expect("utf8"))
-        .arg("archive")
-        .arg(&id)
-        .assert()
-        .success()
-        .stdout(contains("task archived"));
-
     let mut gc = Command::cargo_bin("taskspace").expect("binary");
     gc.arg("--root")
         .arg(root.to_str().expect("utf8"))
         .arg("gc")
         .assert()
         .success();
-}
-
-#[test]
-fn binary_completion_outputs_script() {
-    let mut completion = Command::cargo_bin("taskspace").expect("binary");
-    completion
-        .arg("completion")
-        .arg("bash")
-        .assert()
-        .success()
-        .stdout(contains("__complete-tasks"));
-}
-
-#[test]
-fn binary_complete_tasks_lists_task_ids() {
-    let temp = tempdir().expect("tempdir");
-    let root = temp.path().to_path_buf();
-
-    let mut start = Command::cargo_bin("taskspace").expect("binary");
-    start
-        .arg("--root")
-        .arg(root.to_str().expect("utf8"))
-        .arg("start")
-        .arg("completion task")
-        .assert()
-        .success();
-
-    let mut complete = Command::cargo_bin("taskspace").expect("binary");
-    complete
-        .arg("--root")
-        .arg(root.to_str().expect("utf8"))
-        .arg("__complete-tasks")
-        .assert()
-        .success()
-        .stdout(contains("tsk_"));
 }
