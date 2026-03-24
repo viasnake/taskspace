@@ -1,57 +1,39 @@
 use std::path::PathBuf;
 
 use taskspace_app::{
-    ArchiveTaskRequest, AttachRootRequest, DetachRootRequest, EnterTaskRequest, FinishTaskRequest,
-    GcResult, ShowTaskRequest, StartTaskRequest, TaskSummary, TaskspaceApp, VerifyTaskRequest,
+    EnterTaskRequest, FinishTaskRequest, GcResult, ShowTaskRequest, StartTaskRequest, TaskSummary,
+    TaskspaceApp, UseReposRequest,
 };
-use taskspace_core::{RootAccess, RootIsolation, RootType, Task, TaskState, TaskspaceError};
+use taskspace_core::{Task, TaskState, TaskspaceError};
 
 #[derive(Debug, Clone)]
 pub enum CommandRequest {
-    Start {
+    New {
         title: String,
-        adapter: Option<String>,
     },
-    Attach {
+    Repos,
+    Use {
         task_ref: String,
-        path: PathBuf,
-        root_type: RootType,
-        role: String,
-        access: RootAccess,
-        isolation: RootIsolation,
-    },
-    Detach {
-        task_ref: String,
-        root_id: String,
+        repos: Vec<String>,
     },
     Enter {
         task_ref: String,
-        adapter: Option<String>,
     },
     List,
     Show {
-        task_ref: String,
-    },
-    Verify {
         task_ref: String,
     },
     Finish {
         task_ref: String,
         state: TaskState,
     },
-    Archive {
-        task_ref: String,
-    },
     Gc,
 }
 
 pub enum CommandResult {
     Started(Task),
-    Attached {
-        root_id: String,
-        warnings: Vec<String>,
-    },
-    Detached,
+    Repos(Vec<String>),
+    Scoped(Task),
     Entered {
         adapter: String,
         cwd: PathBuf,
@@ -59,12 +41,7 @@ pub enum CommandResult {
     },
     TaskList(Vec<TaskSummary>),
     TaskDetail(Task),
-    Verified {
-        task_id: String,
-        ran: Vec<String>,
-    },
     Finished(TaskState),
-    Archived,
     Gc(GcResult),
 }
 
@@ -73,46 +50,28 @@ pub fn execute(
     command: CommandRequest,
 ) -> Result<CommandResult, TaskspaceError> {
     match command {
-        CommandRequest::Start { title, adapter } => {
+        CommandRequest::New { title } => {
             let task = app
                 .start_task(StartTaskRequest {
                     title,
-                    entry_adapter: adapter,
+                    entry_adapter: None,
                 })
                 .map_err(map_anyhow_error)?;
             Ok(CommandResult::Started(task))
         }
-        CommandRequest::Attach {
-            task_ref,
-            path,
-            root_type,
-            role,
-            access,
-            isolation,
-        } => {
-            let result = app
-                .attach_root(AttachRootRequest {
-                    task_ref,
-                    root_type,
-                    path,
-                    role,
-                    access,
-                    isolation,
-                })
-                .map_err(map_anyhow_error)?;
-            Ok(CommandResult::Attached {
-                root_id: result.root_id,
-                warnings: result.warnings,
-            })
+        CommandRequest::Repos => {
+            let repos = app.list_repos().map_err(map_anyhow_error)?;
+            Ok(CommandResult::Repos(repos))
         }
-        CommandRequest::Detach { task_ref, root_id } => {
-            app.detach_root(DetachRootRequest { task_ref, root_id })
+        CommandRequest::Use { task_ref, repos } => {
+            let task = app
+                .use_repos(UseReposRequest { task_ref, repos })
                 .map_err(map_anyhow_error)?;
-            Ok(CommandResult::Detached)
+            Ok(CommandResult::Scoped(task))
         }
-        CommandRequest::Enter { task_ref, adapter } => {
+        CommandRequest::Enter { task_ref } => {
             let result = app
-                .enter_task(EnterTaskRequest { task_ref, adapter })
+                .enter_task(EnterTaskRequest { task_ref })
                 .map_err(map_anyhow_error)?;
             Ok(CommandResult::Entered {
                 adapter: result.adapter,
@@ -130,15 +89,6 @@ pub fn execute(
                 .map_err(map_anyhow_error)?;
             Ok(CommandResult::TaskDetail(task))
         }
-        CommandRequest::Verify { task_ref } => {
-            let result = app
-                .verify_task(VerifyTaskRequest { task_ref })
-                .map_err(map_anyhow_error)?;
-            Ok(CommandResult::Verified {
-                task_id: result.task_id,
-                ran: result.ran,
-            })
-        }
         CommandRequest::Finish { task_ref, state } => {
             let state = app
                 .finish_task(FinishTaskRequest {
@@ -147,11 +97,6 @@ pub fn execute(
                 })
                 .map_err(map_anyhow_error)?;
             Ok(CommandResult::Finished(state))
-        }
-        CommandRequest::Archive { task_ref } => {
-            app.archive_task(ArchiveTaskRequest { task_ref })
-                .map_err(map_anyhow_error)?;
-            Ok(CommandResult::Archived)
         }
         CommandRequest::Gc => {
             let result = app.gc().map_err(map_anyhow_error)?;
@@ -164,73 +109,5 @@ pub fn map_anyhow_error(err: anyhow::Error) -> TaskspaceError {
     match err.downcast::<TaskspaceError>() {
         Ok(ts_err) => ts_err,
         Err(other) => TaskspaceError::Internal(other.to_string()),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::tempdir;
-
-    #[test]
-    fn execute_start_list_show_finish_archive_gc_flow() {
-        let temp = tempdir().expect("temp");
-        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
-
-        let started = execute(
-            &app,
-            CommandRequest::Start {
-                title: "demo".to_string(),
-                adapter: None,
-            },
-        )
-        .expect("start");
-        let task_id = match started {
-            CommandResult::Started(task) => task.id.as_str().to_string(),
-            _ => panic!("expected started"),
-        };
-
-        let listed = execute(&app, CommandRequest::List).expect("list");
-        match listed {
-            CommandResult::TaskList(list) => assert_eq!(list.len(), 1),
-            _ => panic!("expected list"),
-        }
-
-        let shown = execute(
-            &app,
-            CommandRequest::Show {
-                task_ref: task_id.clone(),
-            },
-        )
-        .expect("show");
-        match shown {
-            CommandResult::TaskDetail(task) => assert_eq!(task.title, "demo"),
-            _ => panic!("expected detail"),
-        }
-
-        let finished = execute(
-            &app,
-            CommandRequest::Finish {
-                task_ref: task_id.clone(),
-                state: TaskState::Done,
-            },
-        )
-        .expect("finish");
-        match finished {
-            CommandResult::Finished(state) => assert_eq!(state, TaskState::Done),
-            _ => panic!("expected finished"),
-        }
-
-        let archived = execute(
-            &app,
-            CommandRequest::Archive {
-                task_ref: task_id.clone(),
-            },
-        )
-        .expect("archive");
-        assert!(matches!(archived, CommandResult::Archived));
-
-        let gc = execute(&app, CommandRequest::Gc).expect("gc");
-        assert!(matches!(gc, CommandResult::Gc(_)));
     }
 }

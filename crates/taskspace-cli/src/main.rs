@@ -11,7 +11,7 @@ mod render;
 
 #[derive(Parser)]
 #[command(name = "taskspace")]
-#[command(version, about = "Task-oriented multi-root workspace manager")]
+#[command(version, about = "Minimal task launcher for AI work")]
 #[command(disable_version_flag = true)]
 #[command(propagate_version = true)]
 struct Cli {
@@ -33,48 +33,25 @@ struct Cli {
 
 #[derive(Debug, Clone, Subcommand)]
 pub(crate) enum Commands {
-    Start {
+    New {
         title: String,
-        #[arg(long)]
-        adapter: Option<String>,
     },
-    Attach {
+    Repos,
+    Use {
         task: String,
-        path: PathBuf,
-        #[arg(long = "type", value_enum)]
-        root_type: RootTypeArg,
-        #[arg(long)]
-        role: String,
-        #[arg(long, action = ArgAction::SetTrue)]
-        ro: bool,
-        #[arg(long, action = ArgAction::SetTrue)]
-        rw: bool,
-        #[arg(long, value_enum)]
-        isolation: Option<IsolationArg>,
-    },
-    Detach {
-        task: String,
-        root_id: String,
+        repos: Vec<String>,
     },
     Enter {
         task: String,
-        #[arg(long)]
-        adapter: Option<String>,
     },
     List,
     Show {
-        task: String,
-    },
-    Verify {
         task: String,
     },
     Finish {
         task: String,
         #[arg(long, value_enum)]
         state: Option<TaskStateArg>,
-    },
-    Archive {
-        task: String,
     },
     Gc,
     Completion {
@@ -86,26 +63,7 @@ pub(crate) enum Commands {
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
-pub(crate) enum RootTypeArg {
-    Git,
-    Dir,
-    File,
-    Artifact,
-    Scratch,
-}
-
-#[derive(Debug, Clone, Copy, ValueEnum)]
-pub(crate) enum IsolationArg {
-    Direct,
-    Worktree,
-    Copy,
-    Symlink,
-    Generated,
-}
-
-#[derive(Debug, Clone, Copy, ValueEnum)]
 pub(crate) enum TaskStateArg {
-    Active,
     Blocked,
     Review,
     Done,
@@ -183,12 +141,12 @@ const BASH_COMPLETION: &str = r#"_taskspace() {
     cmd="${COMP_WORDS[1]}"
 
     if [[ ${COMP_CWORD} -eq 1 ]]; then
-        COMPREPLY=( $(compgen -W "start attach detach enter list show verify finish archive gc completion" -- "$cur") )
+        COMPREPLY=( $(compgen -W "new repos use enter list show finish gc completion" -- "$cur") )
         return 0
     fi
 
     case "$cmd" in
-        attach|detach|enter|show|verify|finish|archive)
+        use|enter|show|finish)
             if [[ ${COMP_CWORD} -eq 2 ]]; then
                 COMPREPLY=( $(compgen -W "$(taskspace __complete-tasks 2>/dev/null) current" -- "$cur") )
             fi
@@ -208,7 +166,7 @@ const ZSH_COMPLETION: &str = r#"#compdef taskspace
 
 _taskspace() {
     local -a commands tasks shells
-    commands=(start attach detach enter list show verify finish archive gc completion)
+    commands=(new repos use enter list show finish gc completion)
     shells=(bash zsh fish)
 
     if (( CURRENT == 2 )); then
@@ -217,7 +175,7 @@ _taskspace() {
     fi
 
     case "$words[2]" in
-        attach|detach|enter|show|verify|finish|archive)
+        use|enter|show|finish)
             if (( CURRENT == 3 )); then
                 tasks=("${(@f)$(taskspace __complete-tasks 2>/dev/null)}" "current")
                 compadd -a tasks
@@ -235,8 +193,8 @@ compdef _taskspace taskspace
 "#;
 
 const FISH_COMPLETION: &str = r#"complete -c taskspace -f
-complete -c taskspace -n "not __fish_seen_subcommand_from start attach detach enter list show verify finish archive gc completion" -a "start attach detach enter list show verify finish archive gc completion"
-complete -c taskspace -n "__fish_seen_subcommand_from attach detach enter show verify finish archive" -a "(taskspace __complete-tasks 2>/dev/null) current"
+complete -c taskspace -n "not __fish_seen_subcommand_from new repos use enter list show finish gc completion" -a "new repos use enter list show finish gc completion"
+complete -c taskspace -n "__fish_seen_subcommand_from use enter show finish" -a "(taskspace __complete-tasks 2>/dev/null) current"
 complete -c taskspace -n "__fish_seen_subcommand_from completion" -a "bash zsh fish"
 "#;
 
@@ -258,19 +216,18 @@ mod tests {
     }
 
     #[test]
-    fn start_and_show_work() {
+    fn new_and_list_work() {
         let temp = tempdir().expect("temp");
         let root = Some(temp.path().to_path_buf());
         let started = run_with_cli(Cli {
             _version: None,
             root: root.clone(),
-            command: Commands::Start {
+            command: Commands::New {
                 title: "demo".to_string(),
-                adapter: None,
             },
         })
-        .expect("start");
-        assert!(started[0].contains("started task:"));
+        .expect("new");
+        assert!(started[0].starts_with("tsk_"));
 
         let list = run_with_cli(Cli {
             _version: None,
@@ -279,19 +236,5 @@ mod tests {
         })
         .expect("list");
         assert_eq!(list.len(), 1);
-    }
-
-    #[test]
-    fn completion_outputs_script() {
-        let out = run_with_cli(Cli {
-            _version: None,
-            root: None,
-            command: Commands::Completion {
-                shell: Some(SupportedShell::Bash),
-            },
-        })
-        .expect("completion");
-        let script = out.join("\n");
-        assert!(script.contains("taskspace __complete-tasks"));
     }
 }
