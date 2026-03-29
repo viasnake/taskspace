@@ -143,3 +143,70 @@ pub enum TaskspaceError {
     #[error("internal error: {0}")]
     Internal(String),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_task(visible_repos: VisibleRepos) -> Task {
+        Task {
+            id: TaskId::parse("tsk_demo01").expect("task id"),
+            title: "demo".to_string(),
+            state: TaskState::Active,
+            updated_at: "2026-03-30T00:00:00Z".to_string(),
+            entry_adapter: "opencode".to_string(),
+            visible_repos,
+        }
+    }
+
+    #[test]
+    fn task_id_parse_validates_format() {
+        assert!(TaskId::parse("tsk_demo01").is_ok());
+        assert!(TaskId::parse("demo01").is_err());
+        assert!(TaskId::parse("tsk_a").is_err());
+        assert!(TaskId::parse("tsk_demo!").is_err());
+    }
+
+    #[test]
+    fn task_state_transitions_follow_lifecycle_rules() {
+        assert!(TaskState::Active.can_transition_to(TaskState::Done));
+        assert!(TaskState::Blocked.can_transition_to(TaskState::Review));
+        assert!(TaskState::Review.can_transition_to(TaskState::Archived));
+        assert!(TaskState::Done.can_transition_to(TaskState::Review));
+        assert!(!TaskState::Done.can_transition_to(TaskState::Active));
+        assert!(!TaskState::Archived.can_transition_to(TaskState::Active));
+    }
+
+    #[test]
+    fn visible_repos_display_scope_matches_mode() {
+        assert_eq!(VisibleRepos::All.display_scope(), "all");
+        assert_eq!(
+            VisibleRepos::Selected(vec!["app".to_string(), "infra".to_string()]).display_scope(),
+            "2"
+        );
+    }
+
+    #[test]
+    fn task_validate_rejects_invalid_payloads() {
+        let empty_title = Task {
+            title: "   ".to_string(),
+            ..sample_task(VisibleRepos::All)
+        };
+        assert!(empty_title.validate().is_err());
+
+        let empty_adapter = Task {
+            entry_adapter: "".to_string(),
+            ..sample_task(VisibleRepos::All)
+        };
+        assert!(empty_adapter.validate().is_err());
+
+        let empty_repo = sample_task(VisibleRepos::Selected(vec!["".to_string()]));
+        assert!(empty_repo.validate().is_err());
+
+        assert!(
+            sample_task(VisibleRepos::Selected(vec!["app".to_string()]))
+                .validate()
+                .is_ok()
+        );
+    }
+}

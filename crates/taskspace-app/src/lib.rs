@@ -470,4 +470,238 @@ mod tests {
         let items = app.list_tasks().expect("list");
         assert_eq!(items[0].visible_scope, "1");
     }
+
+    #[test]
+    fn start_rejects_empty_title() {
+        let temp = tempdir().expect("temp");
+        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
+
+        let err = app
+            .start_task(StartTaskRequest {
+                title: "   ".to_string(),
+                entry_adapter: None,
+            })
+            .expect_err("empty title should fail");
+        assert!(err.to_string().contains("task title cannot be empty"));
+    }
+
+    #[test]
+    fn use_repos_deduplicates_and_rejects_unknown_names() {
+        let temp = tempdir().expect("temp");
+        fs::create_dir_all(temp.path().join("repos").join("app")).expect("mkdir");
+        fs::create_dir_all(temp.path().join("repos").join("infra")).expect("mkdir");
+        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
+
+        let task = app
+            .start_task(StartTaskRequest {
+                title: "demo task".to_string(),
+                entry_adapter: None,
+            })
+            .expect("start");
+
+        let updated = app
+            .use_repos(UseReposRequest {
+                task_ref: task.id.as_str().to_string(),
+                repos: vec!["app".to_string(), "app".to_string(), "infra".to_string()],
+            })
+            .expect("use");
+        assert!(matches!(
+            updated.visible_repos,
+            VisibleRepos::Selected(ref items) if items == &vec!["app".to_string(), "infra".to_string()]
+        ));
+
+        let err = app
+            .use_repos(UseReposRequest {
+                task_ref: task.id.as_str().to_string(),
+                repos: vec!["missing".to_string()],
+            })
+            .expect_err("missing repo should fail");
+        assert!(err.to_string().contains("does not exist"));
+    }
+
+    #[test]
+    fn show_finish_and_current_resolution_work() {
+        let temp = tempdir().expect("temp");
+        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
+
+        let first = app
+            .start_task(StartTaskRequest {
+                title: "first".to_string(),
+                entry_adapter: None,
+            })
+            .expect("first");
+        let second = app
+            .start_task(StartTaskRequest {
+                title: "second".to_string(),
+                entry_adapter: None,
+            })
+            .expect("second");
+
+        let shown = app
+            .show_task(ShowTaskRequest {
+                task_ref: second.id.as_str().to_string(),
+            })
+            .expect("show");
+        assert_eq!(shown.title, "second");
+
+        let current = app
+            .show_task(ShowTaskRequest {
+                task_ref: "current".to_string(),
+            })
+            .expect("current");
+        assert_eq!(current.id.as_str(), second.id.as_str());
+
+        let state = app
+            .finish_task(FinishTaskRequest {
+                task_ref: first.id.as_str().to_string(),
+                target_state: TaskState::Done,
+            })
+            .expect("finish");
+        assert_eq!(state, TaskState::Done);
+    }
+
+    #[test]
+    fn finish_rejects_invalid_transition() {
+        let temp = tempdir().expect("temp");
+        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
+
+        let task = app
+            .start_task(StartTaskRequest {
+                title: "demo".to_string(),
+                entry_adapter: None,
+            })
+            .expect("start");
+        app.finish_task(FinishTaskRequest {
+            task_ref: task.id.as_str().to_string(),
+            target_state: TaskState::Archived,
+        })
+        .expect("archive");
+
+        let err = app
+            .finish_task(FinishTaskRequest {
+                task_ref: task.id.as_str().to_string(),
+                target_state: TaskState::Done,
+            })
+            .expect_err("archived task cannot move");
+        assert!(err.to_string().contains("cannot transition task"));
+    }
+
+    #[test]
+    fn prepare_view_writes_taskspace_and_links_selected_repos() {
+        let temp = tempdir().expect("temp");
+        fs::create_dir_all(temp.path().join("repos").join("app")).expect("mkdir");
+        fs::create_dir_all(temp.path().join("repos").join("infra")).expect("mkdir");
+        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
+
+        let task = app
+            .start_task(StartTaskRequest {
+                title: "demo".to_string(),
+                entry_adapter: None,
+            })
+            .expect("start");
+        let task = app
+            .use_repos(UseReposRequest {
+                task_ref: task.id.as_str().to_string(),
+                repos: vec!["app".to_string()],
+            })
+            .expect("use");
+
+        let view_dir = app.prepare_view(&task).expect("prepare view");
+        assert!(view_dir.join("repos").join("app").exists());
+        assert!(!view_dir.join("repos").join("infra").exists());
+        let taskspace_md = fs::read_to_string(view_dir.join("TASKSPACE.md")).expect("taskspace");
+        assert!(taskspace_md.contains("Task: demo"));
+        assert!(taskspace_md.contains("Visible repositories are under ./repos/."));
+    }
+
+    #[test]
+    fn prepare_view_rejects_missing_selected_repo() {
+        let temp = tempdir().expect("temp");
+        fs::create_dir_all(temp.path().join("repos")).expect("mkdir");
+        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
+        ensure_layout(temp.path()).expect("layout");
+
+        let task = Task {
+            id: TaskId::parse("tsk_demo01").expect("task id"),
+            title: "demo".to_string(),
+            state: TaskState::Active,
+            updated_at: "2026-03-30T00:00:00Z".to_string(),
+            entry_adapter: "opencode".to_string(),
+            visible_repos: VisibleRepos::Selected(vec!["missing".to_string()]),
+        };
+        app.save_task(&task).expect("save");
+
+        let err = app
+            .prepare_view(&task)
+            .expect_err("missing repo should fail");
+        assert!(err.to_string().contains("configured in task but missing"));
+    }
+
+    #[test]
+    fn gc_removes_stale_scratch_and_view_directories() {
+        let temp = tempdir().expect("temp");
+        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
+        let task = app
+            .start_task(StartTaskRequest {
+                title: "demo".to_string(),
+                entry_adapter: None,
+            })
+            .expect("start");
+
+        let stale_scratch = temp
+            .path()
+            .join("state")
+            .join("scratch")
+            .join("tsk_stale01");
+        let stale_view = temp.path().join("state").join("views").join("tsk_stale01");
+        fs::create_dir_all(&stale_scratch).expect("stale scratch");
+        fs::create_dir_all(&stale_view).expect("stale view");
+        fs::create_dir_all(
+            temp.path()
+                .join("state")
+                .join("scratch")
+                .join(task.id.as_str()),
+        )
+        .expect("active scratch");
+
+        let result = app.gc().expect("gc");
+        assert_eq!(result.removed.len(), 2);
+        assert!(!stale_scratch.exists());
+        assert!(!stale_view.exists());
+        assert!(
+            temp.path()
+                .join("state")
+                .join("scratch")
+                .join(task.id.as_str())
+                .exists()
+        );
+    }
+
+    #[test]
+    fn load_task_rejects_mismatched_registry_entry() {
+        let temp = tempdir().expect("temp");
+        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
+        ensure_layout(temp.path()).expect("layout");
+
+        let dir = temp.path().join("state").join("tasks").join("tsk_demo01");
+        fs::create_dir_all(&dir).expect("dir");
+        fs::write(
+            dir.join("task.yaml"),
+            r#"id: tsk_other01
+title: demo
+state: active
+updated_at: 2026-03-30T00:00:00Z
+entry_adapter: opencode
+visible_repos: all
+"#,
+        )
+        .expect("write");
+
+        let err = app
+            .show_task(ShowTaskRequest {
+                task_ref: "tsk_demo01".to_string(),
+            })
+            .expect_err("mismatch should fail");
+        assert!(err.to_string().contains("task id mismatch"));
+    }
 }

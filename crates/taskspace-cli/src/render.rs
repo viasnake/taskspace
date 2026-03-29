@@ -85,3 +85,100 @@ fn state_label(state: TaskState) -> &'static str {
         TaskState::Archived => "archived",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use taskspace_app::{GcResult, TaskSummary};
+    use taskspace_core::{Task, TaskId};
+
+    fn sample_task(visible_repos: VisibleRepos) -> Task {
+        Task {
+            id: TaskId::parse("tsk_demo01").expect("task id"),
+            title: "demo".to_string(),
+            state: TaskState::Review,
+            updated_at: "2026-03-30T00:00:00Z".to_string(),
+            entry_adapter: "opencode".to_string(),
+            visible_repos,
+        }
+    }
+
+    #[test]
+    fn render_covers_primary_command_results() {
+        assert_eq!(
+            render(CommandResult::Started(sample_task(VisibleRepos::All))),
+            vec!["tsk_demo01".to_string()]
+        );
+        assert_eq!(
+            render(CommandResult::Repos(Vec::new())),
+            vec!["no repositories found".to_string()]
+        );
+        assert_eq!(
+            render(CommandResult::Repos(vec!["app".to_string()])),
+            vec!["app".to_string()]
+        );
+        assert_eq!(
+            render(CommandResult::Scoped(sample_task(VisibleRepos::All))),
+            vec!["visible_repos: all".to_string()]
+        );
+        assert_eq!(
+            render(CommandResult::Scoped(sample_task(VisibleRepos::Selected(
+                vec!["app".to_string(), "infra".to_string(),]
+            )))),
+            vec!["visible_repos: [app, infra]".to_string()]
+        );
+        assert_eq!(
+            render(CommandResult::Finished(TaskState::Archived)),
+            vec!["task state updated: archived".to_string()]
+        );
+    }
+
+    #[test]
+    fn render_formats_detail_entry_list_and_gc_results() {
+        let entered = render(CommandResult::Entered {
+            adapter: "opencode".to_string(),
+            cwd: PathBuf::from("/tmp/taskspace"),
+            task_id: "tsk_demo01".to_string(),
+        });
+        assert_eq!(
+            entered,
+            vec!["entered task tsk_demo01 with adapter opencode at /tmp/taskspace".to_string()]
+        );
+
+        let listed = render(CommandResult::TaskList(vec![TaskSummary {
+            id: "tsk_demo01".to_string(),
+            title: "demo".to_string(),
+            state: TaskState::Active,
+            visible_scope: "all".to_string(),
+            updated_at: "2026-03-30T00:00:00Z".to_string(),
+        }]));
+        assert_eq!(
+            listed,
+            vec!["tsk_demo01\tdemo\tactive\tvisible=all\t2026-03-30T00:00:00Z".to_string()]
+        );
+        assert_eq!(
+            render(CommandResult::TaskList(Vec::new())),
+            vec!["no tasks found".to_string()]
+        );
+
+        let detailed = render(CommandResult::TaskDetail(sample_task(
+            VisibleRepos::Selected(vec!["app".to_string()]),
+        )));
+        assert_eq!(detailed[0], "id: tsk_demo01");
+        assert_eq!(detailed[4], "visible_repos: app");
+
+        assert_eq!(
+            render(CommandResult::Gc(GcResult {
+                removed: Vec::new()
+            })),
+            vec!["gc: nothing to remove".to_string()]
+        );
+        let gc = render(CommandResult::Gc(GcResult {
+            removed: vec![PathBuf::from("/tmp/a"), PathBuf::from("/tmp/b")],
+        }));
+        assert_eq!(gc[0], "gc removed 2 entries");
+        assert_eq!(gc[1], "- /tmp/a");
+        assert_eq!(gc[2], "- /tmp/b");
+    }
+}
