@@ -73,106 +73,30 @@ impl TaskState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RootType {
-    Git,
-    Dir,
-    File,
-    Artifact,
-    Scratch,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RootAccess {
-    Ro,
-    Rw,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RootIsolation {
-    Direct,
-    Worktree,
-    Copy,
-    Symlink,
-    Generated,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Root {
-    pub id: String,
-    #[serde(rename = "type")]
-    pub root_type: RootType,
-    pub path: String,
-    pub role: String,
-    pub access: RootAccess,
-    pub isolation: RootIsolation,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub branch: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub base_branch: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    pub include: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    pub exclude: Vec<String>,
+#[serde(rename_all = "snake_case")]
+pub enum VisibleRepos {
+    All,
+    Selected(Vec<String>),
 }
 
-impl Root {
-    pub fn validate(&self) -> Result<(), TaskspaceError> {
-        if self.id.trim().is_empty()
-            || !self
-                .id
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-        {
-            return Err(TaskspaceError::Usage(
-                "root id must contain only [A-Za-z0-9_-]".to_string(),
-            ));
+impl VisibleRepos {
+    pub fn display_scope(&self) -> String {
+        match self {
+            Self::All => "all".to_string(),
+            Self::Selected(repos) => repos.len().to_string(),
         }
-        if self.path.trim().is_empty() {
-            return Err(TaskspaceError::Usage(
-                "root path must not be empty".to_string(),
-            ));
-        }
-        if self.role.trim().is_empty() {
-            return Err(TaskspaceError::Usage(
-                "root role must not be empty".to_string(),
-            ));
-        }
-        Ok(())
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct VerifySpec {
-    #[serde(default)]
-    pub commands: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub done_when: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct TaskNotes {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub summary: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Task {
     pub id: TaskId,
     pub title: String,
-    pub slug: String,
     pub state: TaskState,
     pub updated_at: String,
     pub entry_adapter: String,
-    #[serde(default)]
-    pub roots: Vec<Root>,
-    #[serde(default)]
-    pub verify: VerifySpec,
-    #[serde(default)]
-    pub notes: TaskNotes,
+    pub visible_repos: VisibleRepos,
 }
 
 impl Task {
@@ -180,16 +104,17 @@ impl Task {
         if self.title.trim().is_empty() {
             return Err(TaskspaceError::Corrupt("task title is empty".to_string()));
         }
-        if self.slug.trim().is_empty() {
-            return Err(TaskspaceError::Corrupt("task slug is empty".to_string()));
-        }
         if self.entry_adapter.trim().is_empty() {
             return Err(TaskspaceError::Corrupt(
                 "task entry_adapter is empty".to_string(),
             ));
         }
-        for root in &self.roots {
-            root.validate()?;
+        if let VisibleRepos::Selected(items) = &self.visible_repos
+            && items.iter().any(|item| item.trim().is_empty())
+        {
+            return Err(TaskspaceError::Corrupt(
+                "visible_repos has empty repository name".to_string(),
+            ));
         }
         Ok(())
     }
@@ -223,50 +148,65 @@ pub enum TaskspaceError {
 mod tests {
     use super::*;
 
-    #[test]
-    fn task_id_requires_tsk_prefix() {
-        assert!(TaskId::parse("tsk_01abcde").is_ok());
-        assert!(TaskId::parse("abc").is_err());
+    fn sample_task(visible_repos: VisibleRepos) -> Task {
+        Task {
+            id: TaskId::parse("tsk_demo01").expect("task id"),
+            title: "demo".to_string(),
+            state: TaskState::Active,
+            updated_at: "2026-03-30T00:00:00Z".to_string(),
+            entry_adapter: "opencode".to_string(),
+            visible_repos,
+        }
     }
 
     #[test]
-    fn lifecycle_transition_rules_work() {
-        assert!(TaskState::Active.can_transition_to(TaskState::Blocked));
-        assert!(TaskState::Done.can_transition_to(TaskState::Archived));
+    fn task_id_parse_validates_format() {
+        assert!(TaskId::parse("tsk_demo01").is_ok());
+        assert!(TaskId::parse("demo01").is_err());
+        assert!(TaskId::parse("tsk_a").is_err());
+        assert!(TaskId::parse("tsk_demo!").is_err());
+    }
+
+    #[test]
+    fn task_state_transitions_follow_lifecycle_rules() {
+        assert!(TaskState::Active.can_transition_to(TaskState::Done));
+        assert!(TaskState::Blocked.can_transition_to(TaskState::Review));
+        assert!(TaskState::Review.can_transition_to(TaskState::Archived));
+        assert!(TaskState::Done.can_transition_to(TaskState::Review));
+        assert!(!TaskState::Done.can_transition_to(TaskState::Active));
         assert!(!TaskState::Archived.can_transition_to(TaskState::Active));
     }
 
     #[test]
-    fn task_validation_checks_fields() {
-        let task = Task {
-            id: TaskId::parse("tsk_01abcde").expect("id"),
-            title: "demo".to_string(),
-            slug: "demo".to_string(),
-            state: TaskState::Active,
-            updated_at: "2026-03-24T00:00:00Z".to_string(),
-            entry_adapter: "opencode".to_string(),
-            roots: vec![Root {
-                id: "root_a".to_string(),
-                root_type: RootType::Dir,
-                path: "/tmp".to_string(),
-                role: "source".to_string(),
-                access: RootAccess::Ro,
-                isolation: RootIsolation::Direct,
-                branch: None,
-                base_branch: None,
-                include: Vec::new(),
-                exclude: Vec::new(),
-            }],
-            verify: VerifySpec::default(),
-            notes: TaskNotes::default(),
-        };
-
-        task.validate().expect("valid task");
+    fn visible_repos_display_scope_matches_mode() {
+        assert_eq!(VisibleRepos::All.display_scope(), "all");
+        assert_eq!(
+            VisibleRepos::Selected(vec!["app".to_string(), "infra".to_string()]).display_scope(),
+            "2"
+        );
     }
 
     #[test]
-    fn task_id_deserialize_rejects_invalid_value() {
-        let parsed = serde_yaml::from_str::<TaskId>("'../bad'");
-        assert!(parsed.is_err());
+    fn task_validate_rejects_invalid_payloads() {
+        let empty_title = Task {
+            title: "   ".to_string(),
+            ..sample_task(VisibleRepos::All)
+        };
+        assert!(empty_title.validate().is_err());
+
+        let empty_adapter = Task {
+            entry_adapter: "".to_string(),
+            ..sample_task(VisibleRepos::All)
+        };
+        assert!(empty_adapter.validate().is_err());
+
+        let empty_repo = sample_task(VisibleRepos::Selected(vec!["".to_string()]));
+        assert!(empty_repo.validate().is_err());
+
+        assert!(
+            sample_task(VisibleRepos::Selected(vec!["app".to_string()]))
+                .validate()
+                .is_ok()
+        );
     }
 }

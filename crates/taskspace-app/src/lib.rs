@@ -1,21 +1,18 @@
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, anyhow};
 use chrono::Utc;
-use taskspace_core::{
-    Root, RootAccess, RootIsolation, RootType, Task, TaskId, TaskState, TaskspaceError, VerifySpec,
-};
+use taskspace_core::{Task, TaskId, TaskState, TaskspaceError, VisibleRepos};
 use taskspace_infra_fs::{create_dir, list_directories, remove_dir_all, run_command};
 
 const DEFAULT_ADAPTER: &str = "opencode";
 
 #[derive(Debug, Clone)]
 pub struct TaskspaceApp {
-    state_root: PathBuf,
+    workspace_root: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -25,29 +22,13 @@ pub struct StartTaskRequest {
 }
 
 #[derive(Debug, Clone)]
-pub struct AttachRootRequest {
+pub struct UseReposRequest {
     pub task_ref: String,
-    pub root_type: RootType,
-    pub path: PathBuf,
-    pub role: String,
-    pub access: RootAccess,
-    pub isolation: RootIsolation,
-}
-
-#[derive(Debug, Clone)]
-pub struct DetachRootRequest {
-    pub task_ref: String,
-    pub root_id: String,
+    pub repos: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct EnterTaskRequest {
-    pub task_ref: String,
-    pub adapter: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct VerifyTaskRequest {
     pub task_ref: String,
 }
 
@@ -55,11 +36,6 @@ pub struct VerifyTaskRequest {
 pub struct FinishTaskRequest {
     pub task_ref: String,
     pub target_state: TaskState,
-}
-
-#[derive(Debug, Clone)]
-pub struct ArchiveTaskRequest {
-    pub task_ref: String,
 }
 
 #[derive(Debug, Clone)]
@@ -72,14 +48,8 @@ pub struct TaskSummary {
     pub id: String,
     pub title: String,
     pub state: TaskState,
-    pub roots_count: usize,
+    pub visible_scope: String,
     pub updated_at: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct AttachRootResult {
-    pub root_id: String,
-    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -90,25 +60,15 @@ pub struct EnterTaskResult {
 }
 
 #[derive(Debug, Clone)]
-pub struct VerifyTaskResult {
-    pub task_id: String,
-    pub ran: Vec<String>,
-}
-
-#[derive(Debug, Clone)]
 pub struct GcResult {
     pub removed: Vec<PathBuf>,
 }
 
 impl TaskspaceApp {
-    pub fn new(state_root: Option<PathBuf>) -> Result<Self> {
+    pub fn new(workspace_root: Option<PathBuf>) -> Result<Self> {
         Ok(Self {
-            state_root: state_root.unwrap_or(default_state_root()?),
+            workspace_root: workspace_root.unwrap_or(default_workspace_root()?),
         })
-    }
-
-    pub fn state_root(&self) -> &Path {
-        &self.state_root
     }
 
     pub fn start_task(&self, request: StartTaskRequest) -> Result<Task> {
@@ -118,53 +78,76 @@ impl TaskspaceApp {
             )));
         }
 
-        ensure_layout(&self.state_root)?;
+        ensure_layout(&self.workspace_root)?;
 
         let id = new_task_id()?;
         let task_id = TaskId::parse(&id)?;
         let now = Utc::now().to_rfc3339();
+
         let scratch_path = self.scratch_dir().join(task_id.as_str());
         create_dir(&scratch_path).map_err(map_infra_error)?;
 
         let task = Task {
             id: task_id,
-            title: request.title.clone(),
-            slug: slugify(&request.title),
+            title: request.title,
             state: TaskState::Active,
             updated_at: now,
             entry_adapter: request
                 .entry_adapter
                 .unwrap_or_else(|| DEFAULT_ADAPTER.to_string()),
-            roots: vec![Root {
-                id: "root_scratch".to_string(),
-                root_type: RootType::Scratch,
-                path: scratch_path.display().to_string(),
-                role: "scratch".to_string(),
-                access: RootAccess::Rw,
-                isolation: RootIsolation::Generated,
-                branch: None,
-                base_branch: None,
-                include: Vec::new(),
-                exclude: Vec::new(),
-            }],
-            verify: VerifySpec::default(),
-            notes: Default::default(),
+            visible_repos: VisibleRepos::All,
         };
         task.validate()?;
         self.save_task(&task)?;
         Ok(task)
     }
 
+    pub fn list_repos(&self) -> Result<Vec<String>> {
+        ensure_layout(&self.workspace_root)?;
+        list_directories(&self.repos_dir()).map_err(map_infra_error)
+    }
+
+    pub fn use_repos(&self, request: UseReposRequest) -> Result<Task> {
+        if request.repos.is_empty() {
+            return Err(anyhow!(TaskspaceError::Usage(
+                "at least one repository must be specified".to_string(),
+            )));
+        }
+
+        let available = self.list_repos()?;
+        let available_set: HashSet<_> = available.iter().cloned().collect();
+
+        let mut deduped = Vec::new();
+        for name in request.repos {
+            if !available_set.contains(&name) {
+                return Err(anyhow!(TaskspaceError::NotFound(format!(
+                    "repository '{}' does not exist under {}",
+                    name,
+                    self.repos_dir().display()
+                ))));
+            }
+            if !deduped.contains(&name) {
+                deduped.push(name);
+            }
+        }
+
+        let mut task = self.load_task_from_ref(&request.task_ref)?;
+        task.visible_repos = VisibleRepos::Selected(deduped);
+        task.updated_at = Utc::now().to_rfc3339();
+        self.save_task(&task)?;
+        Ok(task)
+    }
+
     pub fn list_tasks(&self) -> Result<Vec<TaskSummary>> {
-        ensure_layout(&self.state_root)?;
+        ensure_layout(&self.workspace_root)?;
         let mut out = Vec::new();
-        for entry in list_directories(&self.registry_tasks_dir()).map_err(map_infra_error)? {
+        for entry in list_directories(&self.tasks_dir()).map_err(map_infra_error)? {
             let task = self.load_task_by_id(entry.as_str())?;
             out.push(TaskSummary {
                 id: task.id.as_str().to_string(),
                 title: task.title,
                 state: task.state,
-                roots_count: task.roots.len(),
+                visible_scope: task.visible_repos.display_scope(),
                 updated_at: task.updated_at,
             });
         }
@@ -173,96 +156,16 @@ impl TaskspaceApp {
     }
 
     pub fn show_task(&self, request: ShowTaskRequest) -> Result<Task> {
-        let task = self.load_task_from_ref(request.task_ref.as_str())?;
-        Ok(task)
-    }
-
-    pub fn attach_root(&self, request: AttachRootRequest) -> Result<AttachRootResult> {
-        let mut task = self.load_task_from_ref(request.task_ref.as_str())?;
-        let canonical = fs::canonicalize(&request.path).unwrap_or(request.path.clone());
-        if !canonical.exists() {
-            return Err(anyhow!(TaskspaceError::NotFound(format!(
-                "root path does not exist: {}",
-                canonical.display()
-            ))));
-        }
-
-        let root_id = next_root_id(&task.roots);
-        let root = Root {
-            id: root_id.clone(),
-            root_type: request.root_type,
-            path: canonical.display().to_string(),
-            role: request.role,
-            access: request.access,
-            isolation: request.isolation,
-            branch: None,
-            base_branch: None,
-            include: Vec::new(),
-            exclude: Vec::new(),
-        };
-        root.validate()?;
-        task.roots.push(root);
-        task.updated_at = Utc::now().to_rfc3339();
-
-        let warnings = self.collect_rw_direct_warnings(&task)?;
-        self.save_task(&task)?;
-        Ok(AttachRootResult { root_id, warnings })
-    }
-
-    pub fn detach_root(&self, request: DetachRootRequest) -> Result<()> {
-        let mut task = self.load_task_from_ref(request.task_ref.as_str())?;
-        let before = task.roots.len();
-        task.roots.retain(|root| root.id != request.root_id);
-        if task.roots.len() == before {
-            return Err(anyhow!(TaskspaceError::NotFound(format!(
-                "root id not found: {}",
-                request.root_id
-            ))));
-        }
-        task.updated_at = Utc::now().to_rfc3339();
-        self.save_task(&task)
-    }
-
-    pub fn verify_task(&self, request: VerifyTaskRequest) -> Result<VerifyTaskResult> {
-        let task = self.load_task_from_ref(request.task_ref.as_str())?;
-        let cwd = self.resolve_default_cwd(&task)?;
-        let mut ran = Vec::new();
-        for command in &task.verify.commands {
-            let (program, args) = parse_verify_command(command)?;
-            let status = Command::new(program)
-                .args(args)
-                .current_dir(&cwd)
-                .status()
-                .map_err(|err| {
-                    anyhow!(TaskspaceError::ExternalCommand(format!(
-                        "failed to execute verify command '{}': {}",
-                        command, err
-                    )))
-                })?;
-            if !status.success() {
-                return Err(anyhow!(TaskspaceError::ExternalCommand(format!(
-                    "verify command failed: '{}' (status: {})",
-                    command, status
-                ))));
-            }
-            ran.push(command.clone());
-        }
-        Ok(VerifyTaskResult {
-            task_id: task.id.as_str().to_string(),
-            ran,
-        })
+        self.load_task_from_ref(request.task_ref.as_str())
     }
 
     pub fn enter_task(&self, request: EnterTaskRequest) -> Result<EnterTaskResult> {
         let task = self.load_task_from_ref(request.task_ref.as_str())?;
-        let adapter = request
-            .adapter
-            .unwrap_or_else(|| task.entry_adapter.clone());
-        let view_dir = self.prepare_synthesized_view(&task)?;
-        launch_adapter(adapter.as_str(), &view_dir)?;
+        let view_dir = self.prepare_view(&task)?;
+        launch_adapter(&task.entry_adapter, &view_dir)?;
 
         Ok(EnterTaskResult {
-            adapter,
+            adapter: task.entry_adapter,
             cwd: view_dir,
             task_id: task.id.as_str().to_string(),
         })
@@ -282,21 +185,8 @@ impl TaskspaceApp {
         Ok(task.state)
     }
 
-    pub fn archive_task(&self, request: ArchiveTaskRequest) -> Result<()> {
-        let mut task = self.load_task_from_ref(request.task_ref.as_str())?;
-        if !task.state.can_transition_to(TaskState::Archived) {
-            return Err(anyhow!(TaskspaceError::Conflict(format!(
-                "cannot archive task from state {:?}",
-                task.state
-            ))));
-        }
-        task.state = TaskState::Archived;
-        task.updated_at = Utc::now().to_rfc3339();
-        self.save_task(&task)
-    }
-
     pub fn gc(&self) -> Result<GcResult> {
-        ensure_layout(&self.state_root)?;
+        ensure_layout(&self.workspace_root)?;
         let mut active_ids = HashSet::new();
         for summary in self.list_tasks()? {
             active_ids.insert(summary.id);
@@ -321,44 +211,65 @@ impl TaskspaceApp {
         Ok(GcResult { removed })
     }
 
-    fn collect_rw_direct_warnings(&self, task: &Task) -> Result<Vec<String>> {
-        let mut warnings = Vec::new();
-        let summaries = self.list_tasks()?;
-        let shared_path_candidates: Vec<_> = task
-            .roots
-            .iter()
-            .filter(|root| {
-                root.access == RootAccess::Rw
-                    && root.isolation == RootIsolation::Direct
-                    && matches!(root.root_type, RootType::Git | RootType::Artifact)
-            })
-            .map(|root| root.path.clone())
-            .collect();
+    fn prepare_view(&self, task: &Task) -> Result<PathBuf> {
+        let view_dir = self.views_dir().join(task.id.as_str());
+        let repos_link_dir = view_dir.join("repos");
+        let view_scratch_dir = view_dir.join("scratch");
 
-        if shared_path_candidates.is_empty() {
-            return Ok(warnings);
-        }
+        create_dir(&repos_link_dir).map_err(map_infra_error)?;
+        create_dir(&view_scratch_dir).map_err(map_infra_error)?;
 
-        for summary in summaries {
-            if summary.id == task.id.as_str() {
+        for repo in self.resolve_visible_repos(task)? {
+            let target = self.repos_dir().join(&repo);
+            let link = repos_link_dir.join(&repo);
+            if link.symlink_metadata().is_ok() {
                 continue;
             }
-            let other = self.load_task_by_id(summary.id.as_str())?;
-            for root in &other.roots {
-                if root.access == RootAccess::Rw
-                    && root.isolation == RootIsolation::Direct
-                    && shared_path_candidates.contains(&root.path)
-                {
-                    warnings.push(format!(
-                        "shared rw direct root detected with task {} at {}",
-                        other.id.as_str(),
-                        root.path
-                    ));
-                }
+            #[cfg(unix)]
+            {
+                std::os::unix::fs::symlink(&target, &link)
+                    .map_err(|err| anyhow!(TaskspaceError::Io(err.to_string())))?;
+            }
+            #[cfg(not(unix))]
+            {
+                fs::write(&link, target.display().to_string())
+                    .map_err(|err| anyhow!(TaskspaceError::Io(err.to_string())))?;
             }
         }
 
-        Ok(warnings)
+        self.write_taskspace_md(task, &view_dir)?;
+        Ok(view_dir)
+    }
+
+    fn write_taskspace_md(&self, task: &Task, view_dir: &Path) -> Result<()> {
+        let content = format!(
+            "# TASKSPACE\n\nTask: {}\nTask ID: {}\nState: {}\n\nVisible repositories are under ./repos/.\nUse only the repositories relevant to this task.\nUse ./scratch/ for task-local temporary files.\n",
+            task.title,
+            task.id.as_str(),
+            state_label(task.state)
+        );
+        fs::write(view_dir.join("TASKSPACE.md"), content)
+            .map_err(|err| anyhow!(TaskspaceError::Io(err.to_string())))
+    }
+
+    fn resolve_visible_repos(&self, task: &Task) -> Result<Vec<String>> {
+        let available = self.list_repos()?;
+        match &task.visible_repos {
+            VisibleRepos::All => Ok(available),
+            VisibleRepos::Selected(selected) => {
+                let available_set: HashSet<_> = available.iter().cloned().collect();
+                for name in selected {
+                    if !available_set.contains(name) {
+                        return Err(anyhow!(TaskspaceError::NotFound(format!(
+                            "repository '{}' configured in task but missing under {}",
+                            name,
+                            self.repos_dir().display(),
+                        ))));
+                    }
+                }
+                Ok(selected.clone())
+            }
+        }
     }
 
     fn load_task_from_ref(&self, task_ref: &str) -> Result<Task> {
@@ -387,7 +298,7 @@ impl TaskspaceApp {
 
     fn load_task_by_id(&self, id: &str) -> Result<Task> {
         let task_id = TaskId::parse(id)?;
-        let task_yaml = self.registry_tasks_dir().join(id).join("task.yaml");
+        let task_yaml = self.tasks_dir().join(id).join("task.yaml");
         if !task_yaml.exists() {
             return Err(anyhow!(TaskspaceError::NotFound(format!(
                 "task '{}' does not exist",
@@ -411,7 +322,7 @@ impl TaskspaceApp {
 
     fn save_task(&self, task: &Task) -> Result<()> {
         task.validate()?;
-        let task_dir = self.registry_tasks_dir().join(task.id.as_str());
+        let task_dir = self.tasks_dir().join(task.id.as_str());
         create_dir(&task_dir).map_err(map_infra_error)?;
         let yaml = serde_yaml::to_string(task)
             .map_err(|err| anyhow!(TaskspaceError::Internal(err.to_string())))?;
@@ -422,62 +333,56 @@ impl TaskspaceApp {
             .map(|_| ())
     }
 
-    fn resolve_default_cwd(&self, task: &Task) -> Result<PathBuf> {
-        for root in &task.roots {
-            if matches!(root.root_type, RootType::Git | RootType::Dir)
-                && root.access == RootAccess::Rw
-            {
-                return Ok(PathBuf::from(&root.path));
-            }
-        }
-        for root in &task.roots {
-            let path = PathBuf::from(&root.path);
-            if path.is_dir() {
-                return Ok(path);
-            }
-        }
-        Err(anyhow!(TaskspaceError::NotFound(
-            "no suitable working directory found for task".to_string(),
-        )))
-    }
-
-    fn prepare_synthesized_view(&self, task: &Task) -> Result<PathBuf> {
-        let view_dir = self.views_dir().join(task.id.as_str());
-        create_dir(&view_dir).map_err(map_infra_error)?;
-        let roots_dir = view_dir.join("roots");
-        create_dir(&roots_dir).map_err(map_infra_error)?;
-        for root in &task.roots {
-            let target = PathBuf::from(&root.path);
-            let link = roots_dir.join(&root.id);
-            if link.symlink_metadata().is_ok() {
-                continue;
-            }
-            #[cfg(unix)]
-            {
-                std::os::unix::fs::symlink(&target, &link)
-                    .map_err(|err| anyhow!(TaskspaceError::Io(err.to_string())))?;
-            }
-            #[cfg(not(unix))]
-            {
-                fs::write(&link, target.display().to_string())
-                    .map_err(|err| anyhow!(TaskspaceError::Io(err.to_string())))?;
-            }
-        }
-        fs::write(view_dir.join("TASK_ID"), task.id.as_str())
-            .map_err(|err| anyhow!(TaskspaceError::Io(err.to_string())))?;
-        Ok(view_dir)
-    }
-
-    fn registry_tasks_dir(&self) -> PathBuf {
-        self.state_root.join("registry").join("tasks")
-    }
-
-    fn scratch_dir(&self) -> PathBuf {
-        self.state_root.join("scratch")
+    fn tasks_dir(&self) -> PathBuf {
+        self.state_dir().join("tasks")
     }
 
     fn views_dir(&self) -> PathBuf {
-        self.state_root.join("views")
+        self.state_dir().join("views")
+    }
+
+    fn scratch_dir(&self) -> PathBuf {
+        self.state_dir().join("scratch")
+    }
+
+    fn repos_dir(&self) -> PathBuf {
+        self.workspace_root.join("repos")
+    }
+
+    fn state_dir(&self) -> PathBuf {
+        self.workspace_root.join("state")
+    }
+}
+
+fn ensure_layout(workspace_root: &Path) -> Result<()> {
+    create_dir(workspace_root).map_err(map_infra_error)?;
+    create_dir(&workspace_root.join("repos")).map_err(map_infra_error)?;
+    create_dir(&workspace_root.join("state").join("tasks")).map_err(map_infra_error)?;
+    create_dir(&workspace_root.join("state").join("views")).map_err(map_infra_error)?;
+    create_dir(&workspace_root.join("state").join("scratch")).map_err(map_infra_error)?;
+    Ok(())
+}
+
+fn default_workspace_root() -> Result<PathBuf> {
+    let home = home::home_dir()
+        .ok_or_else(|| anyhow!(TaskspaceError::Internal("cannot resolve HOME".to_string())))?;
+    Ok(home.join("taskspace"))
+}
+
+fn new_task_id() -> Result<String> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|err| anyhow!(TaskspaceError::Internal(err.to_string())))?;
+    Ok(format!("tsk_{:x}", now.as_nanos()))
+}
+
+fn state_label(state: TaskState) -> &'static str {
+    match state {
+        TaskState::Active => "active",
+        TaskState::Blocked => "blocked",
+        TaskState::Review => "review",
+        TaskState::Done => "done",
+        TaskState::Archived => "archived",
     }
 }
 
@@ -488,97 +393,11 @@ fn launch_adapter(adapter: &str, view_dir: &Path) -> Result<()> {
                 "failed to launch opencode: {err}"
             )))
         }),
-        "shell" => {
-            let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
-            let status = Command::new(shell)
-                .current_dir(view_dir)
-                .status()
-                .map_err(|err| {
-                    anyhow!(TaskspaceError::ExternalCommand(format!(
-                        "failed to launch shell: {err}"
-                    )))
-                })?;
-            if !status.success() {
-                return Err(anyhow!(TaskspaceError::ExternalCommand(format!(
-                    "shell exited with status: {}",
-                    status
-                ))));
-            }
-            Ok(())
-        }
         _ => Err(anyhow!(TaskspaceError::Usage(format!(
             "unsupported adapter: {}",
             adapter
         )))),
     }
-}
-
-fn parse_verify_command(command: &str) -> Result<(&str, Vec<&str>)> {
-    let mut parts = command.split_whitespace();
-    let program = parts
-        .next()
-        .ok_or_else(|| anyhow!(TaskspaceError::Usage("verify command is empty".to_string())))?;
-    if is_shell_program(program) {
-        return Err(anyhow!(TaskspaceError::Usage(format!(
-            "verify command cannot execute shell directly: {}",
-            program
-        ))));
-    }
-    let args = parts.collect::<Vec<_>>();
-    Ok((program, args))
-}
-
-fn is_shell_program(program: &str) -> bool {
-    matches!(
-        program,
-        "sh" | "bash" | "zsh" | "fish" | "cmd" | "powershell" | "pwsh"
-    )
-}
-
-fn next_root_id(roots: &[Root]) -> String {
-    let mut index = 1usize;
-    loop {
-        let candidate = format!("root_{index}");
-        if roots.iter().all(|root| root.id != candidate) {
-            return candidate;
-        }
-        index += 1;
-    }
-}
-
-fn ensure_layout(root: &Path) -> Result<()> {
-    create_dir(root).map_err(map_infra_error)?;
-    create_dir(&root.join("registry").join("tasks")).map_err(map_infra_error)?;
-    create_dir(&root.join("scratch")).map_err(map_infra_error)?;
-    create_dir(&root.join("cache")).map_err(map_infra_error)?;
-    create_dir(&root.join("gc")).map_err(map_infra_error)?;
-    create_dir(&root.join("views")).map_err(map_infra_error)?;
-    Ok(())
-}
-
-fn new_task_id() -> Result<String> {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|err| anyhow!(TaskspaceError::Internal(err.to_string())))?;
-    Ok(format!("tsk_{:x}", now.as_nanos()))
-}
-
-fn default_state_root() -> Result<PathBuf> {
-    let home = home::home_dir()
-        .ok_or_else(|| anyhow!(TaskspaceError::Internal("cannot resolve HOME".to_string())))?;
-    Ok(home.join(".local").join("state").join("taskspace"))
-}
-
-fn slugify(title: &str) -> String {
-    let mut slug = title
-        .to_ascii_lowercase()
-        .chars()
-        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
-        .collect::<String>();
-    while slug.contains("--") {
-        slug = slug.replace("--", "-");
-    }
-    slug.trim_matches('-').to_string()
 }
 
 fn map_infra_error(err: anyhow::Error) -> anyhow::Error {
@@ -591,268 +410,298 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn start_and_list_tasks_work() {
+    fn start_sets_visible_repos_all() {
         let temp = tempdir().expect("temp");
         let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
 
-        let created = app
+        let task = app
+            .start_task(StartTaskRequest {
+                title: "demo task".to_string(),
+                entry_adapter: Some("opencode".to_string()),
+            })
+            .expect("start");
+        assert!(matches!(task.visible_repos, VisibleRepos::All));
+    }
+
+    #[test]
+    fn use_repos_updates_task() {
+        let temp = tempdir().expect("temp");
+        fs::create_dir_all(temp.path().join("repos").join("app")).expect("mkdir");
+        fs::create_dir_all(temp.path().join("repos").join("infra")).expect("mkdir");
+        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
+
+        let task = app
             .start_task(StartTaskRequest {
                 title: "demo task".to_string(),
                 entry_adapter: None,
             })
             .expect("start");
-        assert_eq!(created.state, TaskState::Active);
-
-        let list = app.list_tasks().expect("list");
-        assert_eq!(list.len(), 1);
-        assert_eq!(list[0].title, "demo task");
-    }
-
-    #[test]
-    fn attach_and_detach_root_work() {
-        let temp = tempdir().expect("temp");
-        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
-        let project = temp.path().join("project");
-        fs::create_dir_all(&project).expect("project");
-
-        let task = app
-            .start_task(StartTaskRequest {
-                title: "attach task".to_string(),
-                entry_adapter: None,
-            })
-            .expect("start");
-
-        let attached = app
-            .attach_root(AttachRootRequest {
+        let updated = app
+            .use_repos(UseReposRequest {
                 task_ref: task.id.as_str().to_string(),
-                root_type: RootType::Dir,
-                path: project,
-                role: "source".to_string(),
-                access: RootAccess::Rw,
-                isolation: RootIsolation::Direct,
+                repos: vec!["app".to_string(), "infra".to_string()],
             })
-            .expect("attach");
+            .expect("use");
 
-        app.detach_root(DetachRootRequest {
-            task_ref: task.id.as_str().to_string(),
-            root_id: attached.root_id,
-        })
-        .expect("detach");
+        assert!(matches!(
+            updated.visible_repos,
+            VisibleRepos::Selected(ref items) if items == &vec!["app".to_string(), "infra".to_string()]
+        ));
     }
 
     #[test]
-    fn finish_and_archive_work() {
+    fn list_shows_scope_count() {
         let temp = tempdir().expect("temp");
+        fs::create_dir_all(temp.path().join("repos").join("app")).expect("mkdir");
         let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
 
         let task = app
             .start_task(StartTaskRequest {
-                title: "finish task".to_string(),
+                title: "demo task".to_string(),
                 entry_adapter: None,
             })
             .expect("start");
+        app.use_repos(UseReposRequest {
+            task_ref: task.id.as_str().to_string(),
+            repos: vec!["app".to_string()],
+        })
+        .expect("use");
+
+        let items = app.list_tasks().expect("list");
+        assert_eq!(items[0].visible_scope, "1");
+    }
+
+    #[test]
+    fn start_rejects_empty_title() {
+        let temp = tempdir().expect("temp");
+        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
+
+        let err = app
+            .start_task(StartTaskRequest {
+                title: "   ".to_string(),
+                entry_adapter: None,
+            })
+            .expect_err("empty title should fail");
+        assert!(err.to_string().contains("task title cannot be empty"));
+    }
+
+    #[test]
+    fn use_repos_deduplicates_and_rejects_unknown_names() {
+        let temp = tempdir().expect("temp");
+        fs::create_dir_all(temp.path().join("repos").join("app")).expect("mkdir");
+        fs::create_dir_all(temp.path().join("repos").join("infra")).expect("mkdir");
+        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
+
+        let task = app
+            .start_task(StartTaskRequest {
+                title: "demo task".to_string(),
+                entry_adapter: None,
+            })
+            .expect("start");
+
+        let updated = app
+            .use_repos(UseReposRequest {
+                task_ref: task.id.as_str().to_string(),
+                repos: vec!["app".to_string(), "app".to_string(), "infra".to_string()],
+            })
+            .expect("use");
+        assert!(matches!(
+            updated.visible_repos,
+            VisibleRepos::Selected(ref items) if items == &vec!["app".to_string(), "infra".to_string()]
+        ));
+
+        let err = app
+            .use_repos(UseReposRequest {
+                task_ref: task.id.as_str().to_string(),
+                repos: vec!["missing".to_string()],
+            })
+            .expect_err("missing repo should fail");
+        assert!(err.to_string().contains("does not exist"));
+    }
+
+    #[test]
+    fn show_finish_and_current_resolution_work() {
+        let temp = tempdir().expect("temp");
+        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
+
+        let first = app
+            .start_task(StartTaskRequest {
+                title: "first".to_string(),
+                entry_adapter: None,
+            })
+            .expect("first");
+        let second = app
+            .start_task(StartTaskRequest {
+                title: "second".to_string(),
+                entry_adapter: None,
+            })
+            .expect("second");
+
+        let shown = app
+            .show_task(ShowTaskRequest {
+                task_ref: second.id.as_str().to_string(),
+            })
+            .expect("show");
+        assert_eq!(shown.title, "second");
+
+        let current = app
+            .show_task(ShowTaskRequest {
+                task_ref: "current".to_string(),
+            })
+            .expect("current");
+        assert_eq!(current.id.as_str(), second.id.as_str());
 
         let state = app
             .finish_task(FinishTaskRequest {
-                task_ref: task.id.as_str().to_string(),
+                task_ref: first.id.as_str().to_string(),
                 target_state: TaskState::Done,
             })
             .expect("finish");
         assert_eq!(state, TaskState::Done);
+    }
 
-        app.archive_task(ArchiveTaskRequest {
+    #[test]
+    fn finish_rejects_invalid_transition() {
+        let temp = tempdir().expect("temp");
+        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
+
+        let task = app
+            .start_task(StartTaskRequest {
+                title: "demo".to_string(),
+                entry_adapter: None,
+            })
+            .expect("start");
+        app.finish_task(FinishTaskRequest {
             task_ref: task.id.as_str().to_string(),
-        })
-        .expect("archive");
-    }
-
-    #[test]
-    fn next_root_id_skips_existing_suffixes() {
-        let roots = vec![
-            Root {
-                id: "root_1".to_string(),
-                root_type: RootType::Dir,
-                path: "/tmp/a".to_string(),
-                role: "source".to_string(),
-                access: RootAccess::Rw,
-                isolation: RootIsolation::Direct,
-                branch: None,
-                base_branch: None,
-                include: Vec::new(),
-                exclude: Vec::new(),
-            },
-            Root {
-                id: "root_3".to_string(),
-                root_type: RootType::Dir,
-                path: "/tmp/b".to_string(),
-                role: "docs".to_string(),
-                access: RootAccess::Ro,
-                isolation: RootIsolation::Direct,
-                branch: None,
-                base_branch: None,
-                include: Vec::new(),
-                exclude: Vec::new(),
-            },
-        ];
-
-        assert_eq!(next_root_id(&roots), "root_2");
-    }
-
-    #[test]
-    fn show_task_rejects_traversal_task_ref() {
-        let temp = tempdir().expect("temp");
-        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
-
-        let err = app
-            .show_task(ShowTaskRequest {
-                task_ref: "../bad".to_string(),
-            })
-            .expect_err("must reject traversal");
-        assert!(format!("{err}").contains("task id"));
-    }
-
-    #[test]
-    fn parse_verify_command_rejects_empty() {
-        let err = parse_verify_command("   ").expect_err("empty should fail");
-        assert!(format!("{err}").contains("verify command is empty"));
-    }
-
-    #[test]
-    fn parse_verify_command_rejects_shell_programs() {
-        let err = parse_verify_command("sh -c ls").expect_err("shell should fail");
-        assert!(format!("{err}").contains("cannot execute shell directly"));
-    }
-
-    #[test]
-    fn attach_rejects_missing_path() {
-        let temp = tempdir().expect("temp");
-        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
-        let task = app
-            .start_task(StartTaskRequest {
-                title: "missing root".to_string(),
-                entry_adapter: None,
-            })
-            .expect("start");
-
-        let err = app
-            .attach_root(AttachRootRequest {
-                task_ref: task.id.as_str().to_string(),
-                root_type: RootType::Dir,
-                path: temp.path().join("nope"),
-                role: "source".to_string(),
-                access: RootAccess::Rw,
-                isolation: RootIsolation::Direct,
-            })
-            .expect_err("must fail");
-        assert!(format!("{err}").contains("root path does not exist"));
-    }
-
-    #[test]
-    fn detach_rejects_unknown_root_id() {
-        let temp = tempdir().expect("temp");
-        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
-        let task = app
-            .start_task(StartTaskRequest {
-                title: "detach root".to_string(),
-                entry_adapter: None,
-            })
-            .expect("start");
-
-        let err = app
-            .detach_root(DetachRootRequest {
-                task_ref: task.id.as_str().to_string(),
-                root_id: "root_missing".to_string(),
-            })
-            .expect_err("must fail");
-        assert!(format!("{err}").contains("root id not found"));
-    }
-
-    #[test]
-    fn finish_rejects_transition_from_archived() {
-        let temp = tempdir().expect("temp");
-        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
-        let task = app
-            .start_task(StartTaskRequest {
-                title: "archive transition".to_string(),
-                entry_adapter: None,
-            })
-            .expect("start");
-
-        app.archive_task(ArchiveTaskRequest {
-            task_ref: task.id.as_str().to_string(),
+            target_state: TaskState::Archived,
         })
         .expect("archive");
 
         let err = app
             .finish_task(FinishTaskRequest {
                 task_ref: task.id.as_str().to_string(),
-                target_state: TaskState::Active,
+                target_state: TaskState::Done,
             })
-            .expect_err("must fail");
-        assert!(format!("{err}").contains("cannot transition task"));
+            .expect_err("archived task cannot move");
+        assert!(err.to_string().contains("cannot transition task"));
     }
 
     #[test]
-    fn verify_runs_commands_and_rejects_shell_wrapper() {
+    fn prepare_view_writes_taskspace_and_links_selected_repos() {
         let temp = tempdir().expect("temp");
+        fs::create_dir_all(temp.path().join("repos").join("app")).expect("mkdir");
+        fs::create_dir_all(temp.path().join("repos").join("infra")).expect("mkdir");
         let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
-        let mut task = app
+
+        let task = app
             .start_task(StartTaskRequest {
-                title: "verify task".to_string(),
+                title: "demo".to_string(),
                 entry_adapter: None,
             })
             .expect("start");
-
-        task.verify.commands = vec!["true".to_string()];
-        app.save_task(&task).expect("save");
-
-        let out = app
-            .verify_task(VerifyTaskRequest {
+        let task = app
+            .use_repos(UseReposRequest {
                 task_ref: task.id.as_str().to_string(),
+                repos: vec!["app".to_string()],
             })
-            .expect("verify");
-        assert_eq!(out.ran, vec!["true".to_string()]);
+            .expect("use");
 
-        task.verify.commands = vec!["sh -c true".to_string()];
-        app.save_task(&task).expect("save");
-        let err = app
-            .verify_task(VerifyTaskRequest {
-                task_ref: task.id.as_str().to_string(),
-            })
-            .expect_err("must reject shell");
-        assert!(format!("{err}").contains("cannot execute shell directly"));
+        let view_dir = app.prepare_view(&task).expect("prepare view");
+        assert!(view_dir.join("repos").join("app").exists());
+        assert!(!view_dir.join("repos").join("infra").exists());
+        let taskspace_md = fs::read_to_string(view_dir.join("TASKSPACE.md")).expect("taskspace");
+        assert!(taskspace_md.contains("Task: demo"));
+        assert!(taskspace_md.contains("Visible repositories are under ./repos/."));
     }
 
     #[test]
-    fn gc_removes_orphan_entries() {
+    fn prepare_view_rejects_missing_selected_repo() {
         let temp = tempdir().expect("temp");
+        fs::create_dir_all(temp.path().join("repos")).expect("mkdir");
         let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
-        ensure_layout(app.state_root()).expect("layout");
-        let orphan_scratch = app.scratch_dir().join("tsk_orphan");
-        let orphan_view = app.views_dir().join("tsk_orphan");
-        fs::create_dir_all(&orphan_scratch).expect("scratch");
-        fs::create_dir_all(&orphan_view).expect("view");
+        ensure_layout(temp.path()).expect("layout");
 
-        let result = app.gc().expect("gc");
-        assert_eq!(result.removed.len(), 2);
+        let task = Task {
+            id: TaskId::parse("tsk_demo01").expect("task id"),
+            title: "demo".to_string(),
+            state: TaskState::Active,
+            updated_at: "2026-03-30T00:00:00Z".to_string(),
+            entry_adapter: "opencode".to_string(),
+            visible_repos: VisibleRepos::Selected(vec!["missing".to_string()]),
+        };
+        app.save_task(&task).expect("save");
+
+        let err = app
+            .prepare_view(&task)
+            .expect_err("missing repo should fail");
+        assert!(err.to_string().contains("configured in task but missing"));
     }
 
     #[test]
-    fn enter_rejects_unknown_adapter_without_launch() {
+    fn gc_removes_stale_scratch_and_view_directories() {
         let temp = tempdir().expect("temp");
         let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
         let task = app
             .start_task(StartTaskRequest {
-                title: "enter task".to_string(),
-                entry_adapter: Some("unknown".to_string()),
+                title: "demo".to_string(),
+                entry_adapter: None,
             })
             .expect("start");
+
+        let stale_scratch = temp
+            .path()
+            .join("state")
+            .join("scratch")
+            .join("tsk_stale01");
+        let stale_view = temp.path().join("state").join("views").join("tsk_stale01");
+        fs::create_dir_all(&stale_scratch).expect("stale scratch");
+        fs::create_dir_all(&stale_view).expect("stale view");
+        fs::create_dir_all(
+            temp.path()
+                .join("state")
+                .join("scratch")
+                .join(task.id.as_str()),
+        )
+        .expect("active scratch");
+
+        let result = app.gc().expect("gc");
+        assert_eq!(result.removed.len(), 2);
+        assert!(!stale_scratch.exists());
+        assert!(!stale_view.exists());
+        assert!(
+            temp.path()
+                .join("state")
+                .join("scratch")
+                .join(task.id.as_str())
+                .exists()
+        );
+    }
+
+    #[test]
+    fn load_task_rejects_mismatched_registry_entry() {
+        let temp = tempdir().expect("temp");
+        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
+        ensure_layout(temp.path()).expect("layout");
+
+        let dir = temp.path().join("state").join("tasks").join("tsk_demo01");
+        fs::create_dir_all(&dir).expect("dir");
+        fs::write(
+            dir.join("task.yaml"),
+            r#"id: tsk_other01
+title: demo
+state: active
+updated_at: 2026-03-30T00:00:00Z
+entry_adapter: opencode
+visible_repos: all
+"#,
+        )
+        .expect("write");
+
         let err = app
-            .enter_task(EnterTaskRequest {
-                task_ref: task.id.as_str().to_string(),
-                adapter: Some("unknown".to_string()),
+            .show_task(ShowTaskRequest {
+                task_ref: "tsk_demo01".to_string(),
             })
-            .expect_err("must fail");
-        assert!(format!("{err}").contains("unsupported adapter"));
+            .expect_err("mismatch should fail");
+        assert!(err.to_string().contains("task id mismatch"));
     }
 }
