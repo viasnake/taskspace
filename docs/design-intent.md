@@ -2,20 +2,26 @@
 
 ## What this tool is
 
-taskspace is a small local checkout manager for parallel AI-agent work.
-It creates a fixed number of reusable git working directories, then helps a human open Codex, OpenCode, or another agent in one of those directories.
+taskspace is a small local workspace manager for parallel AI-agent work.
+It registers multiple Git projects, creates clone slots on demand, keeps those slots fetch-synchronized, and helps a human open Codex, OpenCode, or another agent inside a selected slot.
 
-The primary workflow is `git checkout`.
+The primary workflow is:
+
+1. register a project
+2. create or remove slots as parallelism changes
+3. fetch updates before work begins
+4. let the human or agent run `git checkout` inside the slot
+
 taskspace does not model tasks as persistent registry entries.
-A task is temporary human intent; a slot is durable local infrastructure.
+A task is temporary human intent; a slot is durable but disposable local infrastructure.
 
 ## What taskspace must guarantee
 
-- A slot maps to one reusable working directory.
-- Slots are created for parallelism count, for example `agent-1` and `agent-2`.
-- Slot state is local and inspectable under `state/slots/<slot>/slot.yaml`.
+- A project maps to one Git source.
+- A slot maps to one clone under one project.
+- Projects and slots are local and inspectable under `state/projects/<project>/`.
 - Every slot workspace receives `.taskspace/context.yaml`.
-- `checkout` delegates branch and commit movement to git.
+- `sync` only performs `git fetch --all --prune`.
 - `enter` starts the selected agent with the slot as the working directory when the agent supports it.
 
 ## What taskspace intentionally excludes
@@ -25,6 +31,7 @@ A task is temporary human intent; a slot is durable local infrastructure.
 - multi-root task views
 - policy enforcement for Codex or OpenCode
 - automatic hook installation into user or project config
+- branch selection policy
 - workflow orchestration across agents
 
 ## Codex hooks integration
@@ -50,14 +57,15 @@ Known Codex hook constraints that shape this design:
 
 ## Stable contracts
 
-- Public CLI commands: `init`, `list`, `show`, `checkout`, `enter`, `hook-context`.
-- Slot ids are explicit stable names such as `agent-1`.
+- Public CLI commands: `init`, `project`, `slot`, `sync`, `enter`, `hook-context`.
+- Project ids are explicit stable names such as `app`.
+- Slot refs are explicit stable names such as `app:agent-1`.
 - Context file path inside a slot: `.taskspace/context.yaml`.
 - Default workspace root: `~/taskspace`.
 
 ## Implementation boundaries
 
-- `taskspace-core`: slot model, context model, shared errors.
-- `taskspace-app`: slot registry, git clone/checkout orchestration, context writing, agent entry.
+- `taskspace-core`: project model, slot model, context model, shared errors.
+- `taskspace-app`: project registry, slot registry, git clone/fetch orchestration, context writing, agent entry.
 - `taskspace-infra-fs`: filesystem and process execution helpers.
-- `taskspace-cli`: CLI argument parsing, direct app dispatch, and output rendering.
+- `taskspace-cli`: CLI argument parsing, direct app dispatch, completion, and output rendering.

@@ -1,14 +1,13 @@
 # taskspace
 
-`taskspace` creates reusable git checkout directories for AI agent work.
+`taskspace` manages dynamic Git workspace slots for parallel AI-agent work.
 
 ## Concept
 
-- Git checkout is the primary workflow.
-- A slot is a reusable working directory for Codex, OpenCode, or another local agent.
-- Slots are created for the desired parallelism, not for individual tasks.
-- When one task is done, reuse the same slot for the next task by checking out another branch or commit.
-- taskspace only prepares and tracks local working directories; humans open agents inside those directories.
+- A project is a registered Git source.
+- A slot is a clone for one project, created only when needed.
+- `taskspace` handles project registration, slot lifecycle, fetch-only sync, and agent entry.
+- Branch or commit checkout happens inside the slot with regular `git` commands.
 
 ## Layout
 
@@ -17,12 +16,16 @@ By default, taskspace stores local state under `~/taskspace`.
 ```text
 ~/taskspace/
   workspaces/
-    agent-1/
-    agent-2/
+    app/
+      agent-1/
+      agent-2/
   state/
-    slots/
-      agent-1/slot.yaml
-      agent-2/slot.yaml
+    projects/
+      app/
+        project.yaml
+        slots/
+          agent-1/slot.yaml
+          agent-2/slot.yaml
 ```
 
 Each workspace also contains `.taskspace/context.yaml`. Codex hooks and other local automation can read this file from the session `cwd`.
@@ -43,35 +46,49 @@ brew install viasnake/tap/taskspace
 
 ## Quick Start
 
-Create two reusable checkout slots from a source repository:
+Initialize a taskspace root, register a project, and create two slots:
 
 ```bash
-taskspace init ~/src/app --slots 2
+taskspace init
+taskspace project add app ~/src/app
+taskspace slot add app --count 2
 ```
 
-Use a slot for the next task:
+Fetch updates before work begins:
 
 ```bash
-taskspace checkout agent-1 feature/auth-env
-taskspace enter agent-1 --agent codex
+taskspace sync --all
 ```
 
-When that task is complete, reuse the same slot:
+Open one slot for the next task:
 
 ```bash
-taskspace checkout agent-1 main
-taskspace checkout agent-1 feature/next-change
-taskspace enter agent-1 --agent opencode
+taskspace enter app:agent-1 --agent codex
+cd ~/taskspace/workspaces/app/agent-1
+git checkout feature/auth-env
+```
+
+Add more parallelism later only when needed:
+
+```bash
+taskspace slot add app
+taskspace slot list app
 ```
 
 ## Commands
 
 ```bash
-taskspace init <source> [--slots <n>]
-taskspace list
-taskspace show <slot>
-taskspace checkout <slot> <git-ref>
-taskspace enter <slot> [--agent <codex|opencode>]
+taskspace init
+taskspace project add <project> <source>
+taskspace project list
+taskspace project show <project>
+taskspace slot add <project> [--count <n>]
+taskspace slot list [project]
+taskspace slot show <project:slot>
+taskspace slot remove <project:slot> [--force]
+taskspace sync <project>
+taskspace sync --all
+taskspace enter <project:slot> [--agent <codex|opencode>] [--no-sync]
 taskspace hook-context [path]
 taskspace completion [bash|zsh|fish]
 ```
@@ -97,10 +114,11 @@ statusMessage = "Loading taskspace context"
 
 This keeps hook policy outside taskspace while giving hooks a stable local contract:
 
-- current slot id
+- current project id
+- current slot reference
 - source repository
 - workspace path
-- last requested checkout
+- last successful sync timestamp
 - updated timestamp
 
 Project-local Codex hooks still depend on Codex trust rules for `<repo>/.codex/`. User-level hooks in `~/.codex/` can read taskspace context without modifying cloned repositories.

@@ -622,6 +622,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "home",
+ "serde",
  "serde_yaml",
  "taskspace-core",
  "taskspace-infra-fs",

@@ -36,7 +36,7 @@ fn init_git_repo(path: &Path) {
 }
 
 #[test]
-fn binary_init_and_list_work() {
+fn binary_project_and_slot_commands_work() {
     let temp = tempdir().expect("tempdir");
     let source = temp.path().join("source");
     init_git_repo(&source);
@@ -46,25 +46,48 @@ fn binary_init_and_list_work() {
     init.arg("--root")
         .arg(&root)
         .arg("init")
+        .assert()
+        .success()
+        .stdout(contains("initialized taskspace"));
+
+    let mut project_add = Command::cargo_bin("taskspace").expect("binary");
+    project_add
+        .arg("--root")
+        .arg(&root)
+        .arg("project")
+        .arg("add")
+        .arg("app")
         .arg(&source)
-        .arg("--slots")
+        .assert()
+        .success()
+        .stdout(contains("registered project app"));
+
+    let mut slot_add = Command::cargo_bin("taskspace").expect("binary");
+    slot_add
+        .arg("--root")
+        .arg(&root)
+        .arg("slot")
+        .arg("add")
+        .arg("app")
+        .arg("--count")
         .arg("2")
         .assert()
         .success()
-        .stdout(contains("agent-1"))
-        .stdout(contains("agent-2"));
+        .stdout(contains("app:agent-1"))
+        .stdout(contains("app:agent-2"));
 
     let mut list = Command::cargo_bin("taskspace").expect("binary");
     list.arg("--root")
         .arg(&root)
+        .arg("slot")
         .arg("list")
         .assert()
         .success()
-        .stdout(contains("agent-1"));
+        .stdout(contains("app:agent-1"));
 }
 
 #[test]
-fn binary_show_checkout_and_hook_context_work() {
+fn binary_show_sync_and_hook_context_work() {
     let temp = tempdir().expect("tempdir");
     let source = temp.path().join("source");
     init_git_repo(&source);
@@ -74,33 +97,50 @@ fn binary_show_checkout_and_hook_context_work() {
     init.arg("--root")
         .arg(&root)
         .arg("init")
+        .assert()
+        .success();
+
+    let mut project_add = Command::cargo_bin("taskspace").expect("binary");
+    project_add
+        .arg("--root")
+        .arg(&root)
+        .arg("project")
+        .arg("add")
+        .arg("app")
         .arg(&source)
-        .arg("--slots")
-        .arg("1")
+        .assert()
+        .success();
+
+    let mut slot_add = Command::cargo_bin("taskspace").expect("binary");
+    slot_add
+        .arg("--root")
+        .arg(&root)
+        .arg("slot")
+        .arg("add")
+        .arg("app")
         .assert()
         .success();
 
     let mut show = Command::cargo_bin("taskspace").expect("binary");
     show.arg("--root")
         .arg(&root)
+        .arg("slot")
         .arg("show")
-        .arg("agent-1")
+        .arg("app:agent-1")
         .assert()
         .success()
-        .stdout(contains("id: agent-1"));
+        .stdout(contains("ref: app:agent-1"));
 
-    let mut checkout = Command::cargo_bin("taskspace").expect("binary");
-    checkout
-        .arg("--root")
+    let mut sync = Command::cargo_bin("taskspace").expect("binary");
+    sync.arg("--root")
         .arg(&root)
-        .arg("checkout")
-        .arg("agent-1")
-        .arg("HEAD")
+        .arg("sync")
+        .arg("app")
         .assert()
         .success()
-        .stdout(contains("checked out HEAD"));
+        .stdout(contains("ok\tapp:agent-1\tfetched"));
 
-    let slot_path = root.join("workspaces").join("agent-1");
+    let slot_path = root.join("workspaces").join("app").join("agent-1");
     let mut context = Command::cargo_bin("taskspace").expect("binary");
     context
         .arg("--root")
@@ -109,6 +149,7 @@ fn binary_show_checkout_and_hook_context_work() {
         .arg(&slot_path)
         .assert()
         .success()
-        .stdout(contains("schema_version: 1"))
-        .stdout(contains("agent-1"));
+        .stdout(contains("schema_version: 2"))
+        .stdout(contains("project:"))
+        .stdout(contains("id: app"));
 }

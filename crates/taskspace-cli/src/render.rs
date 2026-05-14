@@ -1,13 +1,59 @@
 use std::path::Path;
 
-use taskspace_app::{CheckoutResult, HookContextResult, InitWorkspacesResult};
-use taskspace_core::WorkspaceSlot;
+use taskspace_app::{
+    AddProjectResult, AddSlotsResult, EnterSlotResult, HookContextResult, InitWorkspaceResult,
+    RemoveSlotResult, SyncSlotsResult,
+};
+use taskspace_core::{Project, WorkspaceSlot};
 
-pub fn initialized(result: InitWorkspacesResult) -> Vec<String> {
+pub fn initialized(result: InitWorkspaceResult) -> Vec<String> {
+    vec![format!("initialized taskspace at {}", result.root.display())]
+}
+
+pub fn project_added(result: AddProjectResult) -> Vec<String> {
+    vec![format!(
+        "registered project {}\tsource={}",
+        result.project.id.as_str(),
+        result.project.source
+    )]
+}
+
+pub fn project_list(projects: Vec<Project>) -> Vec<String> {
+    if projects.is_empty() {
+        return vec!["no projects found".to_string()];
+    }
+    projects
+        .into_iter()
+        .map(|project| {
+            format!(
+                "{}\tsource={}\t{}",
+                project.id.as_str(),
+                project.source,
+                project.updated_at
+            )
+        })
+        .collect()
+}
+
+pub fn project_detail(project: Project) -> Vec<String> {
+    vec![
+        format!("id: {}", project.id.as_str()),
+        format!("source: {}", project.source),
+        format!("updated_at: {}", project.updated_at),
+    ]
+}
+
+pub fn slots_added(result: AddSlotsResult) -> Vec<String> {
     result
         .slots
         .into_iter()
-        .map(|slot| format!("{}\t{}", slot.id.as_str(), slot.path.display()))
+        .map(|slot| {
+            format!(
+                "{}\t{}",
+                slot.slot_ref().as_string(),
+                slot.path.display()
+            )
+        })
         .collect()
 }
 
@@ -19,10 +65,10 @@ pub fn slot_list(slots: Vec<WorkspaceSlot>) -> Vec<String> {
         .into_iter()
         .map(|slot| {
             format!(
-                "{}\t{}\tcheckout={}\t{}",
-                slot.id.as_str(),
+                "{}\t{}\tlast_sync={}\t{}",
+                slot.slot_ref().as_string(),
                 slot.path.display(),
-                slot.last_checkout.unwrap_or_else(|| "unknown".to_string()),
+                slot.last_sync_at.unwrap_or_else(|| "never".to_string()),
                 slot.updated_at
             )
         })
@@ -31,32 +77,56 @@ pub fn slot_list(slots: Vec<WorkspaceSlot>) -> Vec<String> {
 
 pub fn slot_detail(slot: WorkspaceSlot) -> Vec<String> {
     vec![
-        format!("id: {}", slot.id.as_str()),
-        format!("source: {}", slot.source),
+        format!("ref: {}", slot.slot_ref().as_string()),
         format!("path: {}", slot.path.display()),
         format!(
-            "checkout: {}",
-            slot.last_checkout.unwrap_or_else(|| "unknown".to_string())
+            "last_sync_at: {}",
+            slot.last_sync_at.unwrap_or_else(|| "never".to_string())
         ),
         format!("updated_at: {}", slot.updated_at),
     ]
 }
 
-pub fn checked_out(result: CheckoutResult) -> Vec<String> {
+pub fn slot_removed(result: RemoveSlotResult) -> Vec<String> {
     vec![format!(
-        "{} checked out {} at {}",
-        result.slot.id.as_str(),
-        result.git_ref,
+        "removed {} from {}",
+        result.slot.slot_ref().as_string(),
         result.slot.path.display()
     )]
 }
 
-pub fn entered(agent: &str, cwd: &Path, slot_id: &str) -> Vec<String> {
+pub fn sync_result(result: &SyncSlotsResult) -> Vec<String> {
+    if result.statuses.is_empty() {
+        return vec!["no slots found".to_string()];
+    }
+    result
+        .statuses
+        .iter()
+        .map(|status| {
+            let state = if status.success { "ok" } else { "failed" };
+            format!(
+                "{}\t{}\t{}",
+                state,
+                status.slot.slot_ref().as_string(),
+                status.message
+            )
+        })
+        .collect()
+}
+
+pub fn sync_error(result: &SyncSlotsResult) -> String {
+    let failed = result.statuses.iter().filter(|status| !status.success).count();
+    let mut lines = vec![format!("sync failed for {failed} slot(s)")];
+    lines.extend(sync_result(result));
+    lines.join("\n")
+}
+
+pub fn entered(result: &EnterSlotResult) -> Vec<String> {
     vec![format!(
         "entered {} with {} at {}",
-        slot_id,
-        agent,
-        cwd.display()
+        result.slot_ref.as_string(),
+        result.agent,
+        result.cwd.display()
     )]
 }
 
@@ -66,19 +136,23 @@ pub fn hook_context(result: HookContextResult) -> Vec<String> {
     lines
 }
 
+#[allow(dead_code)]
+pub fn path_only(path: &Path) -> Vec<String> {
+    vec![path.display().to_string()]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
-    use taskspace_app::{CheckoutResult, HookContextResult, InitWorkspacesResult};
-    use taskspace_core::{SlotId, WorkspaceSlot};
+    use taskspace_core::{ProjectId, SlotId};
 
     fn sample_slot() -> WorkspaceSlot {
         WorkspaceSlot {
+            project_id: ProjectId::parse("app").expect("project id"),
             id: SlotId::parse("agent-1").expect("slot id"),
-            source: "/src/app".to_string(),
-            path: PathBuf::from("/tmp/taskspace/workspaces/agent-1"),
-            last_checkout: Some("main".to_string()),
+            path: PathBuf::from("/tmp/taskspace/workspaces/app/agent-1"),
+            last_sync_at: Some("2026-05-14T00:00:00Z".to_string()),
             updated_at: "2026-05-14T00:00:00Z".to_string(),
         }
     }
@@ -86,59 +160,43 @@ mod tests {
     #[test]
     fn render_covers_primary_outputs() {
         assert_eq!(
-            initialized(InitWorkspacesResult {
-                slots: vec![sample_slot()]
+            initialized(InitWorkspaceResult {
+                root: PathBuf::from("/tmp/taskspace")
             }),
-            vec!["agent-1\t/tmp/taskspace/workspaces/agent-1".to_string()]
+            vec!["initialized taskspace at /tmp/taskspace".to_string()]
         );
+
+        assert_eq!(project_list(Vec::new()), vec!["no projects found".to_string()]);
         assert_eq!(slot_list(Vec::new()), vec!["no slots found".to_string()]);
-        assert_eq!(
-            slot_list(vec![WorkspaceSlot {
-                id: SlotId::parse("agent-1").expect("slot id"),
-                source: "/src/app".to_string(),
-                path: PathBuf::from("/tmp/taskspace/workspaces/agent-1"),
-                last_checkout: Some("main".to_string()),
-                updated_at: "2026-05-14T00:00:00Z".to_string(),
-            }]),
-            vec![
-                "agent-1\t/tmp/taskspace/workspaces/agent-1\tcheckout=main\t2026-05-14T00:00:00Z"
-                    .to_string()
-            ]
-        );
 
         let detail = slot_detail(sample_slot());
-        assert_eq!(detail[0], "id: agent-1");
-        assert_eq!(detail[3], "checkout: main");
-
-        assert_eq!(
-            checked_out(CheckoutResult {
-                slot: sample_slot(),
-                git_ref: "feature/a".to_string(),
-            }),
-            vec!["agent-1 checked out feature/a at /tmp/taskspace/workspaces/agent-1".to_string()]
-        );
+        assert_eq!(detail[0], "ref: app:agent-1");
+        assert_eq!(detail[2], "last_sync_at: 2026-05-14T00:00:00Z");
     }
 
     #[test]
-    fn render_formats_enter_and_hook_context() {
+    fn render_sync_and_context() {
+        let sync = SyncSlotsResult {
+            statuses: vec![taskspace_app::SyncSlotStatus {
+                slot: sample_slot(),
+                success: true,
+                message: "fetched".to_string(),
+            }],
+        };
         assert_eq!(
-            entered(
-                "codex",
-                &PathBuf::from("/tmp/taskspace/workspaces/agent-1"),
-                "agent-1"
-            ),
-            vec!["entered agent-1 with codex at /tmp/taskspace/workspaces/agent-1".to_string()]
+            sync_result(&sync),
+            vec!["ok\tapp:agent-1\tfetched".to_string()]
         );
 
         let context = hook_context(HookContextResult {
-            path: PathBuf::from("/tmp/taskspace/workspaces/agent-1/.taskspace/context.yaml"),
-            content: "schema_version: 1\n".to_string(),
+            path: PathBuf::from("/tmp/taskspace/workspaces/app/agent-1/.taskspace/context.yaml"),
+            content: "schema_version: 2\n".to_string(),
         });
         assert_eq!(
             context,
             vec![
-                "# /tmp/taskspace/workspaces/agent-1/.taskspace/context.yaml".to_string(),
-                "schema_version: 1".to_string(),
+                "# /tmp/taskspace/workspaces/app/agent-1/.taskspace/context.yaml".to_string(),
+                "schema_version: 2".to_string(),
             ]
         );
     }

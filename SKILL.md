@@ -1,41 +1,43 @@
 ---
-name: taskspace-task-management
-description: Use taskspace to manage task-first multi-root AI workspaces.
+name: taskspace-slot-management
+description: Use taskspace to manage registered Git projects, dynamic clone slots, and pre-work sync for local AI-agent workflows.
 ---
 
-# taskspace task management
+# taskspace slot management
 
-Use this skill when work should be coordinated through `taskspace` task lifecycle.
+Use this skill when work should be coordinated through `taskspace` project registration, slot creation, sync, and agent entry.
 
 ## Core model
 
-- Task is the primary unit.
-- A task can have multiple roots (`git`, `dir`, `file`, `artifact`, `scratch`).
-- `enter` resolves workspace and launches the adapter.
-- Registry is stored under `~/.local/state/taskspace/registry/tasks/`.
+- Project is the primary registered unit.
+- A project maps to one Git source.
+- A slot is one clone under one project.
+- `sync` fetches updates; `enter` launches the agent in the selected slot.
+- Registry is stored under `~/taskspace/state/projects/`.
 
 ## Standard workflow
 
 ```bash
-taskspace start "task title"
-taskspace attach current <path> --type git --role source --rw --isolation worktree
-taskspace attach current <path> --type dir --role docs --ro
-taskspace verify current
-taskspace finish current --state done
-taskspace archive current
+taskspace init
+taskspace project add app ~/src/app
+taskspace slot add app --count 2
+taskspace sync --all
+taskspace enter app:agent-1 --agent codex
 ```
 
 ## Commands
 
 ```bash
-taskspace start <title>
-taskspace attach <task|current> <path> --type <git|dir|file|artifact|scratch> --role <role> [--ro|--rw] [--isolation <direct|worktree|copy|symlink|generated>]
-taskspace detach <task|current> <root-id>
-taskspace enter <task|current> [--adapter opencode]
-taskspace list
-taskspace show <task|current>
-taskspace verify <task|current>
-taskspace finish <task|current> [--state <active|blocked|review|done|archived>]
-taskspace archive <task|current>
-taskspace gc
+taskspace init
+taskspace project add <project> <source>
+taskspace project list
+taskspace project show <project>
+taskspace slot add <project> [--count <n>]
+taskspace slot list [project]
+taskspace slot show <project:slot>
+taskspace slot remove <project:slot> [--force]
+taskspace sync <project>
+taskspace sync --all
+taskspace enter <project:slot> [--agent <codex|opencode>] [--no-sync]
+taskspace hook-context [path]
 ```
