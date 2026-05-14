@@ -4,14 +4,12 @@ use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use taskspace_app::TaskspaceApp;
 use taskspace_core::TaskspaceError;
 
-mod execute;
 mod exit_code;
-mod parse;
 mod render;
 
 #[derive(Parser)]
 #[command(name = "taskspace")]
-#[command(version, about = "Minimal task launcher for AI work")]
+#[command(version, about = "Reusable git checkout slots for AI agent work")]
 #[command(disable_version_flag = true)]
 #[command(propagate_version = true)]
 struct Cli {
@@ -33,41 +31,33 @@ struct Cli {
 
 #[derive(Debug, Clone, Subcommand)]
 pub(crate) enum Commands {
-    New {
-        title: String,
-    },
-    Repos,
-    Use {
-        task: String,
-        repos: Vec<String>,
-    },
-    Enter {
-        task: String,
+    Init {
+        source: PathBuf,
+        #[arg(long)]
+        slots: Option<u16>,
     },
     List,
     Show {
-        task: String,
+        slot: String,
     },
-    Finish {
-        task: String,
-        #[arg(long, value_enum)]
-        state: Option<TaskStateArg>,
+    Checkout {
+        slot: String,
+        git_ref: String,
     },
-    Gc,
+    Enter {
+        slot: String,
+        #[arg(long)]
+        agent: Option<String>,
+    },
+    HookContext {
+        path: Option<PathBuf>,
+    },
     Completion {
         #[arg(value_enum)]
         shell: Option<SupportedShell>,
     },
-    #[command(name = "__complete-tasks", hide = true)]
-    CompleteTasks,
-}
-
-#[derive(Debug, Clone, Copy, ValueEnum)]
-pub(crate) enum TaskStateArg {
-    Blocked,
-    Review,
-    Done,
-    Archived,
+    #[command(name = "__complete-slots", hide = true)]
+    CompleteSlots,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -93,21 +83,50 @@ fn main() {
 }
 
 fn run_with_cli(cli: Cli) -> Result<Vec<String>, TaskspaceError> {
-    let app = TaskspaceApp::new(cli.root).map_err(execute::map_anyhow_error)?;
+    let app = TaskspaceApp::new(cli.root).map_err(map_anyhow_error)?;
     match cli.command {
         Commands::Completion { shell } => {
             let selected = shell.unwrap_or_else(detect_shell);
             Ok(vec![render_completion(selected)])
         }
-        Commands::CompleteTasks => {
-            let tasks = app.list_tasks().map_err(execute::map_anyhow_error)?;
-            Ok(tasks.into_iter().map(|task| task.id).collect())
+        Commands::CompleteSlots => {
+            let slots = app.list_slots().map_err(map_anyhow_error)?;
+            Ok(slots
+                .into_iter()
+                .map(|slot| slot.id.as_str().to_string())
+                .collect())
         }
-        command => {
-            let request = parse::parse_command(command)?;
-            let result = execute::execute(&app, request)?;
-            Ok(render::render(result))
-        }
+        Commands::Init { source, slots } => app
+            .init_workspaces(&source.display().to_string(), slots)
+            .map(render::initialized)
+            .map_err(map_anyhow_error),
+        Commands::List => app
+            .list_slots()
+            .map(render::slot_list)
+            .map_err(map_anyhow_error),
+        Commands::Show { slot } => app
+            .show_slot(&slot)
+            .map(render::slot_detail)
+            .map_err(map_anyhow_error),
+        Commands::Checkout { slot, git_ref } => app
+            .checkout(&slot, &git_ref)
+            .map(render::checked_out)
+            .map_err(map_anyhow_error),
+        Commands::Enter { slot, agent } => app
+            .enter_slot(&slot, agent.as_deref())
+            .map(|result| render::entered(&result.agent, &result.cwd, &result.slot_id))
+            .map_err(map_anyhow_error),
+        Commands::HookContext { path } => app
+            .hook_context(path)
+            .map(render::hook_context)
+            .map_err(map_anyhow_error),
+    }
+}
+
+fn map_anyhow_error(err: anyhow::Error) -> TaskspaceError {
+    match err.downcast::<TaskspaceError>() {
+        Ok(ts_err) => ts_err,
+        Err(other) => TaskspaceError::Internal(other.to_string()),
     }
 }
 
@@ -141,14 +160,14 @@ const BASH_COMPLETION: &str = r#"_taskspace() {
     cmd="${COMP_WORDS[1]}"
 
     if [[ ${COMP_CWORD} -eq 1 ]]; then
-        COMPREPLY=( $(compgen -W "new repos use enter list show finish gc completion" -- "$cur") )
+        COMPREPLY=( $(compgen -W "init list show checkout enter hook-context completion" -- "$cur") )
         return 0
     fi
 
     case "$cmd" in
-        use|enter|show|finish)
+        show|checkout|enter)
             if [[ ${COMP_CWORD} -eq 2 ]]; then
-                COMPREPLY=( $(compgen -W "$(taskspace __complete-tasks 2>/dev/null) current" -- "$cur") )
+                COMPREPLY=( $(compgen -W "$(taskspace __complete-slots 2>/dev/null)" -- "$cur") )
             fi
             ;;
         completion)
@@ -165,8 +184,8 @@ complete -F _taskspace taskspace
 const ZSH_COMPLETION: &str = r#"#compdef taskspace
 
 _taskspace() {
-    local -a commands tasks shells
-    commands=(new repos use enter list show finish gc completion)
+    local -a commands slots shells
+    commands=(init list show checkout enter hook-context completion)
     shells=(bash zsh fish)
 
     if (( CURRENT == 2 )); then
@@ -175,10 +194,10 @@ _taskspace() {
     fi
 
     case "$words[2]" in
-        use|enter|show|finish)
+        show|checkout|enter)
             if (( CURRENT == 3 )); then
-                tasks=("${(@f)$(taskspace __complete-tasks 2>/dev/null)}" "current")
-                compadd -a tasks
+                slots=("${(@f)$(taskspace __complete-slots 2>/dev/null)}")
+                compadd -a slots
             fi
             ;;
         completion)
@@ -193,8 +212,8 @@ compdef _taskspace taskspace
 "#;
 
 const FISH_COMPLETION: &str = r#"complete -c taskspace -f
-complete -c taskspace -n "not __fish_seen_subcommand_from new repos use enter list show finish gc completion" -a "new repos use enter list show finish gc completion"
-complete -c taskspace -n "__fish_seen_subcommand_from use enter show finish" -a "(taskspace __complete-tasks 2>/dev/null) current"
+complete -c taskspace -n "not __fish_seen_subcommand_from init list show checkout enter hook-context completion" -a "init list show checkout enter hook-context completion"
+complete -c taskspace -n "__fish_seen_subcommand_from show checkout enter" -a "(taskspace __complete-slots 2>/dev/null)"
 complete -c taskspace -n "__fish_seen_subcommand_from completion" -a "bash zsh fish"
 "#;
 
@@ -212,29 +231,6 @@ mod tests {
             command: Commands::List,
         })
         .expect("list");
-        assert_eq!(out, vec!["no tasks found".to_string()]);
-    }
-
-    #[test]
-    fn new_and_list_work() {
-        let temp = tempdir().expect("temp");
-        let root = Some(temp.path().to_path_buf());
-        let started = run_with_cli(Cli {
-            _version: None,
-            root: root.clone(),
-            command: Commands::New {
-                title: "demo".to_string(),
-            },
-        })
-        .expect("new");
-        assert!(started[0].starts_with("tsk_"));
-
-        let list = run_with_cli(Cli {
-            _version: None,
-            root,
-            command: Commands::List,
-        })
-        .expect("list");
-        assert_eq!(list.len(), 1);
+        assert_eq!(out, vec!["no slots found".to_string()]);
     }
 }

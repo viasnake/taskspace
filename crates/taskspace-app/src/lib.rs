@@ -1,14 +1,13 @@
-use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, anyhow};
 use chrono::Utc;
-use taskspace_core::{Task, TaskId, TaskState, TaskspaceError, VisibleRepos};
-use taskspace_infra_fs::{create_dir, list_directories, remove_dir_all, run_command};
+use taskspace_core::{SlotId, TaskspaceError, WorkspaceContext, WorkspaceSlot};
+use taskspace_infra_fs::{create_dir, list_directories, run_command, run_command_in_dir};
 
-const DEFAULT_ADAPTER: &str = "opencode";
+const DEFAULT_AGENT: &str = "codex";
+const DEFAULT_SLOT_COUNT: u16 = 2;
 
 #[derive(Debug, Clone)]
 pub struct TaskspaceApp {
@@ -16,52 +15,27 @@ pub struct TaskspaceApp {
 }
 
 #[derive(Debug, Clone)]
-pub struct StartTaskRequest {
-    pub title: String,
-    pub entry_adapter: Option<String>,
+pub struct InitWorkspacesResult {
+    pub slots: Vec<WorkspaceSlot>,
 }
 
 #[derive(Debug, Clone)]
-pub struct UseReposRequest {
-    pub task_ref: String,
-    pub repos: Vec<String>,
+pub struct CheckoutResult {
+    pub slot: WorkspaceSlot,
+    pub git_ref: String,
 }
 
 #[derive(Debug, Clone)]
-pub struct EnterTaskRequest {
-    pub task_ref: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct FinishTaskRequest {
-    pub task_ref: String,
-    pub target_state: TaskState,
-}
-
-#[derive(Debug, Clone)]
-pub struct ShowTaskRequest {
-    pub task_ref: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct TaskSummary {
-    pub id: String,
-    pub title: String,
-    pub state: TaskState,
-    pub visible_scope: String,
-    pub updated_at: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct EnterTaskResult {
-    pub adapter: String,
+pub struct EnterSlotResult {
+    pub agent: String,
     pub cwd: PathBuf,
-    pub task_id: String,
+    pub slot_id: String,
 }
 
 #[derive(Debug, Clone)]
-pub struct GcResult {
-    pub removed: Vec<PathBuf>,
+pub struct HookContextResult {
+    pub path: PathBuf,
+    pub content: String,
 }
 
 impl TaskspaceApp {
@@ -71,295 +45,188 @@ impl TaskspaceApp {
         })
     }
 
-    pub fn start_task(&self, request: StartTaskRequest) -> Result<Task> {
-        if request.title.trim().is_empty() {
+    pub fn init_workspaces(
+        &self,
+        source: &str,
+        slot_count: Option<u16>,
+    ) -> Result<InitWorkspacesResult> {
+        let source = normalize_source(source)?;
+        let slots = slot_count.unwrap_or(DEFAULT_SLOT_COUNT);
+        if slots == 0 {
             return Err(anyhow!(TaskspaceError::Usage(
-                "task title cannot be empty".to_string()
+                "slot count must be greater than zero".to_string()
             )));
         }
 
         ensure_layout(&self.workspace_root)?;
-
-        let id = new_task_id()?;
-        let task_id = TaskId::parse(&id)?;
-        let now = Utc::now().to_rfc3339();
-
-        let scratch_path = self.scratch_dir().join(task_id.as_str());
-        create_dir(&scratch_path).map_err(map_infra_error)?;
-
-        let task = Task {
-            id: task_id,
-            title: request.title,
-            state: TaskState::Active,
-            updated_at: now,
-            entry_adapter: request
-                .entry_adapter
-                .unwrap_or_else(|| DEFAULT_ADAPTER.to_string()),
-            visible_repos: VisibleRepos::All,
-        };
-        task.validate()?;
-        self.save_task(&task)?;
-        Ok(task)
-    }
-
-    pub fn list_repos(&self) -> Result<Vec<String>> {
-        ensure_layout(&self.workspace_root)?;
-        list_directories(&self.repos_dir()).map_err(map_infra_error)
-    }
-
-    pub fn use_repos(&self, request: UseReposRequest) -> Result<Task> {
-        if request.repos.is_empty() {
-            return Err(anyhow!(TaskspaceError::Usage(
-                "at least one repository must be specified".to_string(),
-            )));
+        if !self.list_slots()?.is_empty() {
+            return Err(anyhow!(TaskspaceError::Conflict(format!(
+                "workspace root already has slots under {}",
+                self.slots_dir().display()
+            ))));
         }
 
-        let available = self.list_repos()?;
-        let available_set: HashSet<_> = available.iter().cloned().collect();
+        let mut created = Vec::new();
+        for index in 1..=slots {
+            let slot_id = SlotId::parse(&format!("agent-{index}"))?;
+            let slot_path = self.workspaces_dir().join(slot_id.as_str());
+            git_clone(&source, &slot_path)?;
 
-        let mut deduped = Vec::new();
-        for name in request.repos {
-            if !available_set.contains(&name) {
-                return Err(anyhow!(TaskspaceError::NotFound(format!(
-                    "repository '{}' does not exist under {}",
-                    name,
-                    self.repos_dir().display()
-                ))));
-            }
-            if !deduped.contains(&name) {
-                deduped.push(name);
-            }
+            let slot = WorkspaceSlot {
+                id: slot_id,
+                source: source.clone(),
+                path: slot_path.clone(),
+                last_checkout: current_git_head(&slot_path).ok(),
+                updated_at: Utc::now().to_rfc3339(),
+            };
+            self.save_slot(&slot)?;
+            self.write_workspace_context(&slot)?;
+            created.push(slot);
         }
 
-        let mut task = self.load_task_from_ref(&request.task_ref)?;
-        task.visible_repos = VisibleRepos::Selected(deduped);
-        task.updated_at = Utc::now().to_rfc3339();
-        self.save_task(&task)?;
-        Ok(task)
+        Ok(InitWorkspacesResult { slots: created })
     }
 
-    pub fn list_tasks(&self) -> Result<Vec<TaskSummary>> {
+    pub fn list_slots(&self) -> Result<Vec<WorkspaceSlot>> {
         ensure_layout(&self.workspace_root)?;
         let mut out = Vec::new();
-        for entry in list_directories(&self.tasks_dir()).map_err(map_infra_error)? {
-            let task = self.load_task_by_id(entry.as_str())?;
-            out.push(TaskSummary {
-                id: task.id.as_str().to_string(),
-                title: task.title,
-                state: task.state,
-                visible_scope: task.visible_repos.display_scope(),
-                updated_at: task.updated_at,
-            });
+        for entry in list_directories(&self.slots_dir()).map_err(map_infra_error)? {
+            out.push(self.load_slot_by_id(entry.as_str())?);
         }
-        out.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        out.sort_by(|a, b| a.id.as_str().cmp(b.id.as_str()));
         Ok(out)
     }
 
-    pub fn show_task(&self, request: ShowTaskRequest) -> Result<Task> {
-        self.load_task_from_ref(request.task_ref.as_str())
+    pub fn show_slot(&self, slot_ref: &str) -> Result<WorkspaceSlot> {
+        self.load_slot_from_ref(slot_ref)
     }
 
-    pub fn enter_task(&self, request: EnterTaskRequest) -> Result<EnterTaskResult> {
-        let task = self.load_task_from_ref(request.task_ref.as_str())?;
-        let view_dir = self.prepare_view(&task)?;
-        launch_adapter(&task.entry_adapter, &view_dir)?;
+    pub fn checkout(&self, slot_ref: &str, git_ref: &str) -> Result<CheckoutResult> {
+        if git_ref.trim().is_empty() {
+            return Err(anyhow!(TaskspaceError::Usage(
+                "git ref cannot be empty".to_string()
+            )));
+        }
 
-        Ok(EnterTaskResult {
-            adapter: task.entry_adapter,
-            cwd: view_dir,
-            task_id: task.id.as_str().to_string(),
+        let mut slot = self.load_slot_from_ref(slot_ref)?;
+        let slot_path = slot.path.clone();
+        git_checkout(&slot_path, git_ref)?;
+
+        slot.last_checkout = Some(git_ref.to_string());
+        slot.updated_at = Utc::now().to_rfc3339();
+        self.save_slot(&slot)?;
+        self.write_workspace_context(&slot)?;
+
+        Ok(CheckoutResult {
+            slot,
+            git_ref: git_ref.to_string(),
         })
     }
 
-    pub fn finish_task(&self, request: FinishTaskRequest) -> Result<TaskState> {
-        let mut task = self.load_task_from_ref(request.task_ref.as_str())?;
-        if !task.state.can_transition_to(request.target_state) {
-            return Err(anyhow!(TaskspaceError::Conflict(format!(
-                "cannot transition task from {:?} to {:?}",
-                task.state, request.target_state
-            ))));
-        }
-        task.state = request.target_state;
-        task.updated_at = Utc::now().to_rfc3339();
-        self.save_task(&task)?;
-        Ok(task.state)
+    pub fn enter_slot(&self, slot_ref: &str, agent: Option<&str>) -> Result<EnterSlotResult> {
+        let slot = self.load_slot_from_ref(slot_ref)?;
+        self.write_workspace_context(&slot)?;
+        let agent = agent.unwrap_or(DEFAULT_AGENT);
+        launch_agent(agent, &slot.path)?;
+
+        Ok(EnterSlotResult {
+            agent: agent.to_string(),
+            cwd: slot.path,
+            slot_id: slot.id.as_str().to_string(),
+        })
     }
 
-    pub fn gc(&self) -> Result<GcResult> {
-        ensure_layout(&self.workspace_root)?;
-        let mut active_ids = HashSet::new();
-        for summary in self.list_tasks()? {
-            active_ids.insert(summary.id);
-        }
+    pub fn hook_context(&self, start: Option<PathBuf>) -> Result<HookContextResult> {
+        let start = match start {
+            Some(path) => path,
+            None => std::env::current_dir()
+                .map_err(|err| anyhow!(TaskspaceError::Io(err.to_string())))?,
+        };
+        let context_path = find_workspace_context(&start).ok_or_else(|| {
+            anyhow!(TaskspaceError::NotFound(format!(
+                "no .taskspace/context.yaml found from {}",
+                start.display()
+            )))
+        })?;
+        let content = fs::read_to_string(&context_path)
+            .map_err(|err| anyhow!(TaskspaceError::Io(err.to_string())))?;
+        let context: WorkspaceContext = serde_yaml::from_str(&content)
+            .map_err(|err| anyhow!(TaskspaceError::Corrupt(err.to_string())))?;
+        context.validate()?;
 
-        let mut removed = Vec::new();
-        for name in list_directories(&self.scratch_dir()).map_err(map_infra_error)? {
-            if !active_ids.contains(&name) {
-                let path = self.scratch_dir().join(&name);
-                remove_dir_all(&path).map_err(map_infra_error)?;
-                removed.push(path);
-            }
-        }
-        for name in list_directories(&self.views_dir()).map_err(map_infra_error)? {
-            if !active_ids.contains(&name) {
-                let path = self.views_dir().join(&name);
-                remove_dir_all(&path).map_err(map_infra_error)?;
-                removed.push(path);
-            }
-        }
-
-        Ok(GcResult { removed })
+        Ok(HookContextResult {
+            path: context_path,
+            content,
+        })
     }
 
-    fn prepare_view(&self, task: &Task) -> Result<PathBuf> {
-        let view_dir = self.views_dir().join(task.id.as_str());
-        let repos_link_dir = view_dir.join("repos");
-        let view_scratch_dir = view_dir.join("scratch");
-
-        create_dir(&repos_link_dir).map_err(map_infra_error)?;
-        create_dir(&view_scratch_dir).map_err(map_infra_error)?;
-
-        for repo in self.resolve_visible_repos(task)? {
-            let target = self.repos_dir().join(&repo);
-            let link = repos_link_dir.join(&repo);
-            if link.symlink_metadata().is_ok() {
-                continue;
-            }
-            #[cfg(unix)]
-            {
-                std::os::unix::fs::symlink(&target, &link)
-                    .map_err(|err| anyhow!(TaskspaceError::Io(err.to_string())))?;
-            }
-            #[cfg(not(unix))]
-            {
-                fs::write(&link, target.display().to_string())
-                    .map_err(|err| anyhow!(TaskspaceError::Io(err.to_string())))?;
-            }
-        }
-
-        self.write_taskspace_md(task, &view_dir)?;
-        Ok(view_dir)
+    fn load_slot_from_ref(&self, slot_ref: &str) -> Result<WorkspaceSlot> {
+        let slot_id = SlotId::parse(slot_ref)?;
+        self.load_slot_by_id(slot_id.as_str())
     }
 
-    fn write_taskspace_md(&self, task: &Task, view_dir: &Path) -> Result<()> {
-        let content = format!(
-            "# TASKSPACE\n\nTask: {}\nTask ID: {}\nState: {}\n\nVisible repositories are under ./repos/.\nUse only the repositories relevant to this task.\nUse ./scratch/ for task-local temporary files.\n",
-            task.title,
-            task.id.as_str(),
-            state_label(task.state)
-        );
-        fs::write(view_dir.join("TASKSPACE.md"), content)
-            .map_err(|err| anyhow!(TaskspaceError::Io(err.to_string())))
-    }
-
-    fn resolve_visible_repos(&self, task: &Task) -> Result<Vec<String>> {
-        let available = self.list_repos()?;
-        match &task.visible_repos {
-            VisibleRepos::All => Ok(available),
-            VisibleRepos::Selected(selected) => {
-                let available_set: HashSet<_> = available.iter().cloned().collect();
-                for name in selected {
-                    if !available_set.contains(name) {
-                        return Err(anyhow!(TaskspaceError::NotFound(format!(
-                            "repository '{}' configured in task but missing under {}",
-                            name,
-                            self.repos_dir().display(),
-                        ))));
-                    }
-                }
-                Ok(selected.clone())
-            }
-        }
-    }
-
-    fn load_task_from_ref(&self, task_ref: &str) -> Result<Task> {
-        if task_ref == "current" {
-            let current = self.resolve_current_task_id()?;
-            return self.load_task_by_id(current.as_str());
-        }
-        let task_id = TaskId::parse(task_ref)?;
-        self.load_task_by_id(task_id.as_str())
-    }
-
-    fn resolve_current_task_id(&self) -> Result<String> {
-        let tasks = self.list_tasks()?;
-        let current = tasks
-            .iter()
-            .find(|item| {
-                matches!(
-                    item.state,
-                    TaskState::Active | TaskState::Blocked | TaskState::Review
-                )
-            })
-            .or_else(|| tasks.first())
-            .ok_or_else(|| anyhow!(TaskspaceError::NotFound("no task found".to_string())))?;
-        Ok(current.id.clone())
-    }
-
-    fn load_task_by_id(&self, id: &str) -> Result<Task> {
-        let task_id = TaskId::parse(id)?;
-        let task_yaml = self.tasks_dir().join(id).join("task.yaml");
-        if !task_yaml.exists() {
+    fn load_slot_by_id(&self, id: &str) -> Result<WorkspaceSlot> {
+        let slot_id = SlotId::parse(id)?;
+        let slot_yaml = self.slots_dir().join(id).join("slot.yaml");
+        if !slot_yaml.exists() {
             return Err(anyhow!(TaskspaceError::NotFound(format!(
-                "task '{}' does not exist",
+                "slot '{}' does not exist",
                 id
             ))));
         }
-        let raw = fs::read_to_string(&task_yaml)
+        let raw = fs::read_to_string(&slot_yaml)
             .map_err(|err| anyhow!(TaskspaceError::Io(err.to_string())))?;
-        let task: Task = serde_yaml::from_str(&raw)
+        let slot: WorkspaceSlot = serde_yaml::from_str(&raw)
             .map_err(|err| anyhow!(TaskspaceError::Corrupt(err.to_string())))?;
-        task.validate()?;
-        if task.id.as_str() != task_id.as_str() {
+        slot.validate()?;
+        if slot.id.as_str() != slot_id.as_str() {
             return Err(anyhow!(TaskspaceError::Corrupt(format!(
-                "task id mismatch in registry entry: dir={} file={}",
-                task_id.as_str(),
-                task.id.as_str()
+                "slot id mismatch in registry entry: dir={} file={}",
+                slot_id.as_str(),
+                slot.id.as_str()
             ))));
         }
-        Ok(task)
+        Ok(slot)
     }
 
-    fn save_task(&self, task: &Task) -> Result<()> {
-        task.validate()?;
-        let task_dir = self.tasks_dir().join(task.id.as_str());
-        create_dir(&task_dir).map_err(map_infra_error)?;
-        let yaml = serde_yaml::to_string(task)
+    fn save_slot(&self, slot: &WorkspaceSlot) -> Result<()> {
+        slot.validate()?;
+        let slot_dir = self.slots_dir().join(slot.id.as_str());
+        create_dir(&slot_dir).map_err(map_infra_error)?;
+        let yaml = serde_yaml::to_string(slot)
             .map_err(|err| anyhow!(TaskspaceError::Internal(err.to_string())))?;
-        let temp_path = task_dir.join("task.yaml.tmp");
+        let temp_path = slot_dir.join("slot.yaml.tmp");
         fs::write(&temp_path, yaml).map_err(|err| anyhow!(TaskspaceError::Io(err.to_string())))?;
-        fs::rename(temp_path, task_dir.join("task.yaml"))
+        fs::rename(temp_path, slot_dir.join("slot.yaml"))
             .map_err(|err| anyhow!(TaskspaceError::Io(err.to_string())))
             .map(|_| ())
     }
 
-    fn tasks_dir(&self) -> PathBuf {
-        self.state_dir().join("tasks")
+    fn write_workspace_context(&self, slot: &WorkspaceSlot) -> Result<()> {
+        let slot_path = &slot.path;
+        let taskspace_dir = slot_path.join(".taskspace");
+        create_dir(&taskspace_dir).map_err(map_infra_error)?;
+        let context = WorkspaceContext::new(slot.clone());
+        context.validate()?;
+        let yaml = serde_yaml::to_string(&context)
+            .map_err(|err| anyhow!(TaskspaceError::Internal(err.to_string())))?;
+        fs::write(taskspace_dir.join("context.yaml"), yaml)
+            .map_err(|err| anyhow!(TaskspaceError::Io(err.to_string())))
     }
 
-    fn views_dir(&self) -> PathBuf {
-        self.state_dir().join("views")
+    fn workspaces_dir(&self) -> PathBuf {
+        self.workspace_root.join("workspaces")
     }
 
-    fn scratch_dir(&self) -> PathBuf {
-        self.state_dir().join("scratch")
-    }
-
-    fn repos_dir(&self) -> PathBuf {
-        self.workspace_root.join("repos")
-    }
-
-    fn state_dir(&self) -> PathBuf {
-        self.workspace_root.join("state")
+    fn slots_dir(&self) -> PathBuf {
+        self.workspace_root.join("state").join("slots")
     }
 }
 
 fn ensure_layout(workspace_root: &Path) -> Result<()> {
     create_dir(workspace_root).map_err(map_infra_error)?;
-    create_dir(&workspace_root.join("repos")).map_err(map_infra_error)?;
-    create_dir(&workspace_root.join("state").join("tasks")).map_err(map_infra_error)?;
-    create_dir(&workspace_root.join("state").join("views")).map_err(map_infra_error)?;
-    create_dir(&workspace_root.join("state").join("scratch")).map_err(map_infra_error)?;
+    create_dir(&workspace_root.join("workspaces")).map_err(map_infra_error)?;
+    create_dir(&workspace_root.join("state").join("slots")).map_err(map_infra_error)?;
     Ok(())
 }
 
@@ -369,33 +236,116 @@ fn default_workspace_root() -> Result<PathBuf> {
     Ok(home.join("taskspace"))
 }
 
-fn new_task_id() -> Result<String> {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|err| anyhow!(TaskspaceError::Internal(err.to_string())))?;
-    Ok(format!("tsk_{:x}", now.as_nanos()))
+fn normalize_source(raw: &str) -> Result<String> {
+    if raw.trim().is_empty() {
+        return Err(anyhow!(TaskspaceError::Usage(
+            "source cannot be empty".to_string()
+        )));
+    }
+    let path = PathBuf::from(raw);
+    if path.exists() {
+        return fs::canonicalize(path)
+            .map(|path| path.display().to_string())
+            .map_err(|err| anyhow!(TaskspaceError::Io(err.to_string())));
+    }
+    Ok(raw.to_string())
 }
 
-fn state_label(state: TaskState) -> &'static str {
-    match state {
-        TaskState::Active => "active",
-        TaskState::Blocked => "blocked",
-        TaskState::Review => "review",
-        TaskState::Done => "done",
-        TaskState::Archived => "archived",
+fn current_git_head(slot_path: &Path) -> Result<String> {
+    let branch = taskspace_infra_fs::run_command_capture(
+        "git",
+        &[
+            "-C".to_string(),
+            slot_path.display().to_string(),
+            "branch".to_string(),
+            "--show-current".to_string(),
+        ],
+    )?;
+    if branch.is_empty() {
+        taskspace_infra_fs::run_command_capture(
+            "git",
+            &[
+                "-C".to_string(),
+                slot_path.display().to_string(),
+                "rev-parse".to_string(),
+                "--short".to_string(),
+                "HEAD".to_string(),
+            ],
+        )
+    } else {
+        Ok(branch)
     }
 }
 
-fn launch_adapter(adapter: &str, view_dir: &Path) -> Result<()> {
-    match adapter {
-        "opencode" => run_command("opencode", &[view_dir.display().to_string()]).map_err(|err| {
+fn git_clone(source: &str, destination: &Path) -> Result<()> {
+    run_command(
+        "git",
+        &[
+            "clone".to_string(),
+            source.to_string(),
+            destination.display().to_string(),
+        ],
+    )
+    .map_err(|err| {
+        anyhow!(TaskspaceError::ExternalCommand(format!(
+            "failed to clone source into {}: {err}",
+            destination.display()
+        )))
+    })
+}
+
+fn git_checkout(repo: &Path, git_ref: &str) -> Result<()> {
+    run_command(
+        "git",
+        &[
+            "-C".to_string(),
+            repo.display().to_string(),
+            "checkout".to_string(),
+            git_ref.to_string(),
+        ],
+    )
+    .map_err(|err| {
+        anyhow!(TaskspaceError::ExternalCommand(format!(
+            "failed to checkout '{}' in {}: {err}",
+            git_ref,
+            repo.display()
+        )))
+    })
+}
+
+fn find_workspace_context(start: &Path) -> Option<PathBuf> {
+    let mut current = if start.is_file() {
+        start.parent()?.to_path_buf()
+    } else {
+        start.to_path_buf()
+    };
+
+    loop {
+        let candidate = current.join(".taskspace").join("context.yaml");
+        if candidate.exists() {
+            return Some(candidate);
+        }
+        if !current.pop() {
+            return None;
+        }
+    }
+}
+
+fn launch_agent(agent: &str, cwd: &Path) -> Result<()> {
+    match agent {
+        "codex" => run_command_in_dir("codex", &[], cwd).map_err(|err| {
+            anyhow!(TaskspaceError::ExternalCommand(format!(
+                "failed to launch codex: {err}"
+            )))
+        }),
+        "opencode" => run_command("opencode", &[cwd.display().to_string()]).map_err(|err| {
             anyhow!(TaskspaceError::ExternalCommand(format!(
                 "failed to launch opencode: {err}"
             )))
         }),
         _ => Err(anyhow!(TaskspaceError::Usage(format!(
-            "unsupported adapter: {}",
-            adapter
+            "unsupported agent: {}",
+            agent
         )))),
     }
 }
@@ -409,299 +359,105 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    #[test]
-    fn start_sets_visible_repos_all() {
-        let temp = tempdir().expect("temp");
-        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
-
-        let task = app
-            .start_task(StartTaskRequest {
-                title: "demo task".to_string(),
-                entry_adapter: Some("opencode".to_string()),
-            })
-            .expect("start");
-        assert!(matches!(task.visible_repos, VisibleRepos::All));
-    }
-
-    #[test]
-    fn use_repos_updates_task() {
-        let temp = tempdir().expect("temp");
-        fs::create_dir_all(temp.path().join("repos").join("app")).expect("mkdir");
-        fs::create_dir_all(temp.path().join("repos").join("infra")).expect("mkdir");
-        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
-
-        let task = app
-            .start_task(StartTaskRequest {
-                title: "demo task".to_string(),
-                entry_adapter: None,
-            })
-            .expect("start");
-        let updated = app
-            .use_repos(UseReposRequest {
-                task_ref: task.id.as_str().to_string(),
-                repos: vec!["app".to_string(), "infra".to_string()],
-            })
-            .expect("use");
-
-        assert!(matches!(
-            updated.visible_repos,
-            VisibleRepos::Selected(ref items) if items == &vec!["app".to_string(), "infra".to_string()]
-        ));
-    }
-
-    #[test]
-    fn list_shows_scope_count() {
-        let temp = tempdir().expect("temp");
-        fs::create_dir_all(temp.path().join("repos").join("app")).expect("mkdir");
-        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
-
-        let task = app
-            .start_task(StartTaskRequest {
-                title: "demo task".to_string(),
-                entry_adapter: None,
-            })
-            .expect("start");
-        app.use_repos(UseReposRequest {
-            task_ref: task.id.as_str().to_string(),
-            repos: vec!["app".to_string()],
-        })
-        .expect("use");
-
-        let items = app.list_tasks().expect("list");
-        assert_eq!(items[0].visible_scope, "1");
-    }
-
-    #[test]
-    fn start_rejects_empty_title() {
-        let temp = tempdir().expect("temp");
-        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
-
-        let err = app
-            .start_task(StartTaskRequest {
-                title: "   ".to_string(),
-                entry_adapter: None,
-            })
-            .expect_err("empty title should fail");
-        assert!(err.to_string().contains("task title cannot be empty"));
-    }
-
-    #[test]
-    fn use_repos_deduplicates_and_rejects_unknown_names() {
-        let temp = tempdir().expect("temp");
-        fs::create_dir_all(temp.path().join("repos").join("app")).expect("mkdir");
-        fs::create_dir_all(temp.path().join("repos").join("infra")).expect("mkdir");
-        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
-
-        let task = app
-            .start_task(StartTaskRequest {
-                title: "demo task".to_string(),
-                entry_adapter: None,
-            })
-            .expect("start");
-
-        let updated = app
-            .use_repos(UseReposRequest {
-                task_ref: task.id.as_str().to_string(),
-                repos: vec!["app".to_string(), "app".to_string(), "infra".to_string()],
-            })
-            .expect("use");
-        assert!(matches!(
-            updated.visible_repos,
-            VisibleRepos::Selected(ref items) if items == &vec!["app".to_string(), "infra".to_string()]
-        ));
-
-        let err = app
-            .use_repos(UseReposRequest {
-                task_ref: task.id.as_str().to_string(),
-                repos: vec!["missing".to_string()],
-            })
-            .expect_err("missing repo should fail");
-        assert!(err.to_string().contains("does not exist"));
-    }
-
-    #[test]
-    fn show_finish_and_current_resolution_work() {
-        let temp = tempdir().expect("temp");
-        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
-
-        let first = app
-            .start_task(StartTaskRequest {
-                title: "first".to_string(),
-                entry_adapter: None,
-            })
-            .expect("first");
-        let second = app
-            .start_task(StartTaskRequest {
-                title: "second".to_string(),
-                entry_adapter: None,
-            })
-            .expect("second");
-
-        let shown = app
-            .show_task(ShowTaskRequest {
-                task_ref: second.id.as_str().to_string(),
-            })
-            .expect("show");
-        assert_eq!(shown.title, "second");
-
-        let current = app
-            .show_task(ShowTaskRequest {
-                task_ref: "current".to_string(),
-            })
-            .expect("current");
-        assert_eq!(current.id.as_str(), second.id.as_str());
-
-        let state = app
-            .finish_task(FinishTaskRequest {
-                task_ref: first.id.as_str().to_string(),
-                target_state: TaskState::Done,
-            })
-            .expect("finish");
-        assert_eq!(state, TaskState::Done);
-    }
-
-    #[test]
-    fn finish_rejects_invalid_transition() {
-        let temp = tempdir().expect("temp");
-        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
-
-        let task = app
-            .start_task(StartTaskRequest {
-                title: "demo".to_string(),
-                entry_adapter: None,
-            })
-            .expect("start");
-        app.finish_task(FinishTaskRequest {
-            task_ref: task.id.as_str().to_string(),
-            target_state: TaskState::Archived,
-        })
-        .expect("archive");
-
-        let err = app
-            .finish_task(FinishTaskRequest {
-                task_ref: task.id.as_str().to_string(),
-                target_state: TaskState::Done,
-            })
-            .expect_err("archived task cannot move");
-        assert!(err.to_string().contains("cannot transition task"));
-    }
-
-    #[test]
-    fn prepare_view_writes_taskspace_and_links_selected_repos() {
-        let temp = tempdir().expect("temp");
-        fs::create_dir_all(temp.path().join("repos").join("app")).expect("mkdir");
-        fs::create_dir_all(temp.path().join("repos").join("infra")).expect("mkdir");
-        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
-
-        let task = app
-            .start_task(StartTaskRequest {
-                title: "demo".to_string(),
-                entry_adapter: None,
-            })
-            .expect("start");
-        let task = app
-            .use_repos(UseReposRequest {
-                task_ref: task.id.as_str().to_string(),
-                repos: vec!["app".to_string()],
-            })
-            .expect("use");
-
-        let view_dir = app.prepare_view(&task).expect("prepare view");
-        assert!(view_dir.join("repos").join("app").exists());
-        assert!(!view_dir.join("repos").join("infra").exists());
-        let taskspace_md = fs::read_to_string(view_dir.join("TASKSPACE.md")).expect("taskspace");
-        assert!(taskspace_md.contains("Task: demo"));
-        assert!(taskspace_md.contains("Visible repositories are under ./repos/."));
-    }
-
-    #[test]
-    fn prepare_view_rejects_missing_selected_repo() {
-        let temp = tempdir().expect("temp");
-        fs::create_dir_all(temp.path().join("repos")).expect("mkdir");
-        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
-        ensure_layout(temp.path()).expect("layout");
-
-        let task = Task {
-            id: TaskId::parse("tsk_demo01").expect("task id"),
-            title: "demo".to_string(),
-            state: TaskState::Active,
-            updated_at: "2026-03-30T00:00:00Z".to_string(),
-            entry_adapter: "opencode".to_string(),
-            visible_repos: VisibleRepos::Selected(vec!["missing".to_string()]),
-        };
-        app.save_task(&task).expect("save");
-
-        let err = app
-            .prepare_view(&task)
-            .expect_err("missing repo should fail");
-        assert!(err.to_string().contains("configured in task but missing"));
-    }
-
-    #[test]
-    fn gc_removes_stale_scratch_and_view_directories() {
-        let temp = tempdir().expect("temp");
-        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
-        let task = app
-            .start_task(StartTaskRequest {
-                title: "demo".to_string(),
-                entry_adapter: None,
-            })
-            .expect("start");
-
-        let stale_scratch = temp
-            .path()
-            .join("state")
-            .join("scratch")
-            .join("tsk_stale01");
-        let stale_view = temp.path().join("state").join("views").join("tsk_stale01");
-        fs::create_dir_all(&stale_scratch).expect("stale scratch");
-        fs::create_dir_all(&stale_view).expect("stale view");
-        fs::create_dir_all(
-            temp.path()
-                .join("state")
-                .join("scratch")
-                .join(task.id.as_str()),
+    fn init_git_repo(path: &Path) {
+        fs::create_dir_all(path).expect("repo dir");
+        run_command("git", &["init".to_string(), path.display().to_string()]).expect("git init");
+        fs::write(path.join("README.md"), "demo\n").expect("readme");
+        run_command(
+            "git",
+            &[
+                "-C".to_string(),
+                path.display().to_string(),
+                "add".to_string(),
+                "README.md".to_string(),
+            ],
         )
-        .expect("active scratch");
+        .expect("git add");
+        run_command(
+            "git",
+            &[
+                "-C".to_string(),
+                path.display().to_string(),
+                "-c".to_string(),
+                "user.name=Test".to_string(),
+                "-c".to_string(),
+                "user.email=test@example.com".to_string(),
+                "commit".to_string(),
+                "-m".to_string(),
+                "initial".to_string(),
+            ],
+        )
+        .expect("git commit");
+    }
 
-        let result = app.gc().expect("gc");
-        assert_eq!(result.removed.len(), 2);
-        assert!(!stale_scratch.exists());
-        assert!(!stale_view.exists());
+    #[test]
+    fn init_workspaces_clones_reusable_slots() {
+        let temp = tempdir().expect("temp");
+        let source = temp.path().join("source");
+        init_git_repo(&source);
+        let root = temp.path().join("taskspace");
+        let app = TaskspaceApp::new(Some(root)).expect("app");
+
+        let result = app
+            .init_workspaces(&source.display().to_string(), Some(2))
+            .expect("init");
+
+        assert_eq!(result.slots.len(), 2);
+        assert!(PathBuf::from(&result.slots[0].path).join(".git").exists());
         assert!(
-            temp.path()
-                .join("state")
-                .join("scratch")
-                .join(task.id.as_str())
+            PathBuf::from(&result.slots[0].path)
+                .join(".taskspace")
+                .join("context.yaml")
                 .exists()
         );
     }
 
     #[test]
-    fn load_task_rejects_mismatched_registry_entry() {
+    fn init_rejects_empty_slot_count_and_existing_slots() {
         let temp = tempdir().expect("temp");
-        let app = TaskspaceApp::new(Some(temp.path().to_path_buf())).expect("app");
-        ensure_layout(temp.path()).expect("layout");
-
-        let dir = temp.path().join("state").join("tasks").join("tsk_demo01");
-        fs::create_dir_all(&dir).expect("dir");
-        fs::write(
-            dir.join("task.yaml"),
-            r#"id: tsk_other01
-title: demo
-state: active
-updated_at: 2026-03-30T00:00:00Z
-entry_adapter: opencode
-visible_repos: all
-"#,
-        )
-        .expect("write");
+        let source = temp.path().join("source");
+        init_git_repo(&source);
+        let root = temp.path().join("taskspace");
+        let app = TaskspaceApp::new(Some(root)).expect("app");
 
         let err = app
-            .show_task(ShowTaskRequest {
-                task_ref: "tsk_demo01".to_string(),
-            })
-            .expect_err("mismatch should fail");
-        assert!(err.to_string().contains("task id mismatch"));
+            .init_workspaces(&source.display().to_string(), Some(0))
+            .expect_err("zero slots should fail");
+        assert!(err.to_string().contains("slot count"));
+
+        app.init_workspaces(&source.display().to_string(), Some(1))
+            .expect("init");
+
+        let err = app
+            .init_workspaces(&source.display().to_string(), Some(1))
+            .expect_err("existing slots should fail");
+        assert!(err.to_string().contains("already has slots"));
+    }
+
+    #[test]
+    fn list_show_checkout_and_hook_context_work() {
+        let temp = tempdir().expect("temp");
+        let source = temp.path().join("source");
+        init_git_repo(&source);
+        let root = temp.path().join("taskspace");
+        let app = TaskspaceApp::new(Some(root)).expect("app");
+
+        app.init_workspaces(&source.display().to_string(), Some(1))
+            .expect("init");
+
+        let slots = app.list_slots().expect("list");
+        assert_eq!(slots[0].id.as_str(), "agent-1");
+
+        let shown = app.show_slot("agent-1").expect("show");
+        assert_eq!(shown.id.as_str(), "agent-1");
+
+        let checked_out = app.checkout("agent-1", "HEAD").expect("checkout");
+        assert_eq!(checked_out.slot.last_checkout, Some("HEAD".to_string()));
+
+        let context = app
+            .hook_context(Some(checked_out.slot.path.clone()))
+            .expect("context");
+        assert!(context.content.contains("schema_version: 1"));
+        assert!(context.content.contains("agent-1"));
     }
 }

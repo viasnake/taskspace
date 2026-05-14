@@ -36,8 +36,12 @@ mod tests {
 
     #[test]
     fn command_execution_paths_are_covered() {
+        let temp = tempdir().expect("tempdir");
         let ok_status = run_command("true", &[]);
         assert!(ok_status.is_ok());
+
+        let ok_status_in_dir = run_command_in_dir("true", &[], temp.path());
+        assert!(ok_status_in_dir.is_ok());
 
         let fail_status = run_command("false", &[]);
         assert!(fail_status.is_err());

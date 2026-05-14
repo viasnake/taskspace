@@ -1,26 +1,28 @@
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct TaskId(String);
+pub struct SlotId(String);
 
-impl TaskId {
+impl SlotId {
     pub fn parse(raw: &str) -> Result<Self, TaskspaceError> {
-        if !raw.starts_with("tsk_") {
-            return Err(TaskspaceError::Usage(
-                "task id must start with 'tsk_'".to_string(),
-            ));
+        if raw.trim().is_empty() {
+            return Err(TaskspaceError::Usage("slot id cannot be empty".to_string()));
         }
-        if raw.len() < 8 {
-            return Err(TaskspaceError::Usage("task id is too short".to_string()));
+        if raw == "." || raw == ".." {
+            return Err(TaskspaceError::Usage(
+                "slot id cannot be '.' or '..'".to_string(),
+            ));
         }
         if !raw
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
         {
             return Err(TaskspaceError::Usage(
-                "task id must contain only [A-Za-z0-9_-]".to_string(),
+                "slot id must contain only [A-Za-z0-9_-]".to_string(),
             ));
         }
         Ok(Self(raw.to_string()))
@@ -31,92 +33,69 @@ impl TaskId {
     }
 }
 
-impl TryFrom<String> for TaskId {
+impl TryFrom<String> for SlotId {
     type Error = String;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        TaskId::parse(&value).map_err(|err| err.to_string())
+        SlotId::parse(&value).map_err(|err| err.to_string())
     }
 }
 
-impl From<TaskId> for String {
-    fn from(value: TaskId) -> Self {
+impl From<SlotId> for String {
+    fn from(value: SlotId) -> Self {
         value.0
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TaskState {
-    Active,
-    Blocked,
-    Review,
-    Done,
-    Archived,
-}
-
-impl TaskState {
-    pub fn can_transition_to(self, next: Self) -> bool {
-        match self {
-            Self::Active => matches!(
-                next,
-                Self::Blocked | Self::Review | Self::Done | Self::Archived
-            ),
-            Self::Blocked => matches!(
-                next,
-                Self::Active | Self::Review | Self::Done | Self::Archived
-            ),
-            Self::Review => matches!(next, Self::Active | Self::Done | Self::Archived),
-            Self::Done => matches!(next, Self::Review | Self::Archived),
-            Self::Archived => false,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum VisibleRepos {
-    All,
-    Selected(Vec<String>),
-}
-
-impl VisibleRepos {
-    pub fn display_scope(&self) -> String {
-        match self {
-            Self::All => "all".to_string(),
-            Self::Selected(repos) => repos.len().to_string(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Task {
-    pub id: TaskId,
-    pub title: String,
-    pub state: TaskState,
+pub struct WorkspaceSlot {
+    pub id: SlotId,
+    pub source: String,
+    pub path: PathBuf,
+    pub last_checkout: Option<String>,
     pub updated_at: String,
-    pub entry_adapter: String,
-    pub visible_repos: VisibleRepos,
 }
 
-impl Task {
+impl WorkspaceSlot {
     pub fn validate(&self) -> Result<(), TaskspaceError> {
-        if self.title.trim().is_empty() {
-            return Err(TaskspaceError::Corrupt("task title is empty".to_string()));
+        if self.source.trim().is_empty() {
+            return Err(TaskspaceError::Corrupt("slot source is empty".to_string()));
         }
-        if self.entry_adapter.trim().is_empty() {
-            return Err(TaskspaceError::Corrupt(
-                "task entry_adapter is empty".to_string(),
-            ));
+        if self.path.as_os_str().is_empty() {
+            return Err(TaskspaceError::Corrupt("slot path is empty".to_string()));
         }
-        if let VisibleRepos::Selected(items) = &self.visible_repos
-            && items.iter().any(|item| item.trim().is_empty())
+        if let Some(value) = &self.last_checkout
+            && value.trim().is_empty()
         {
             return Err(TaskspaceError::Corrupt(
-                "visible_repos has empty repository name".to_string(),
+                "slot last_checkout is empty".to_string(),
             ));
         }
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceContext {
+    pub schema_version: u32,
+    pub slot: WorkspaceSlot,
+}
+
+impl WorkspaceContext {
+    pub fn new(slot: WorkspaceSlot) -> Self {
+        Self {
+            schema_version: 1,
+            slot,
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), TaskspaceError> {
+        if self.schema_version == 0 {
+            return Err(TaskspaceError::Corrupt(
+                "context schema_version must be positive".to_string(),
+            ));
+        }
+        self.slot.validate()
     }
 }
 
@@ -148,65 +127,56 @@ pub enum TaskspaceError {
 mod tests {
     use super::*;
 
-    fn sample_task(visible_repos: VisibleRepos) -> Task {
-        Task {
-            id: TaskId::parse("tsk_demo01").expect("task id"),
-            title: "demo".to_string(),
-            state: TaskState::Active,
-            updated_at: "2026-03-30T00:00:00Z".to_string(),
-            entry_adapter: "opencode".to_string(),
-            visible_repos,
+    fn sample_slot() -> WorkspaceSlot {
+        WorkspaceSlot {
+            id: SlotId::parse("slot-1").expect("slot id"),
+            source: "/src/app".to_string(),
+            path: PathBuf::from("/tmp/taskspace/workspaces/slot-1"),
+            last_checkout: Some("main".to_string()),
+            updated_at: "2026-05-14T00:00:00Z".to_string(),
         }
     }
 
     #[test]
-    fn task_id_parse_validates_format() {
-        assert!(TaskId::parse("tsk_demo01").is_ok());
-        assert!(TaskId::parse("demo01").is_err());
-        assert!(TaskId::parse("tsk_a").is_err());
-        assert!(TaskId::parse("tsk_demo!").is_err());
+    fn slot_id_parse_validates_format() {
+        assert!(SlotId::parse("slot-1").is_ok());
+        assert!(SlotId::parse("agent_2").is_ok());
+        assert!(SlotId::parse("").is_err());
+        assert!(SlotId::parse("..").is_err());
+        assert!(SlotId::parse("slot/1").is_err());
     }
 
     #[test]
-    fn task_state_transitions_follow_lifecycle_rules() {
-        assert!(TaskState::Active.can_transition_to(TaskState::Done));
-        assert!(TaskState::Blocked.can_transition_to(TaskState::Review));
-        assert!(TaskState::Review.can_transition_to(TaskState::Archived));
-        assert!(TaskState::Done.can_transition_to(TaskState::Review));
-        assert!(!TaskState::Done.can_transition_to(TaskState::Active));
-        assert!(!TaskState::Archived.can_transition_to(TaskState::Active));
-    }
-
-    #[test]
-    fn visible_repos_display_scope_matches_mode() {
-        assert_eq!(VisibleRepos::All.display_scope(), "all");
-        assert_eq!(
-            VisibleRepos::Selected(vec!["app".to_string(), "infra".to_string()]).display_scope(),
-            "2"
-        );
-    }
-
-    #[test]
-    fn task_validate_rejects_invalid_payloads() {
-        let empty_title = Task {
-            title: "   ".to_string(),
-            ..sample_task(VisibleRepos::All)
+    fn workspace_slot_validate_rejects_invalid_payloads() {
+        let empty_source = WorkspaceSlot {
+            source: "   ".to_string(),
+            ..sample_slot()
         };
-        assert!(empty_title.validate().is_err());
+        assert!(empty_source.validate().is_err());
 
-        let empty_adapter = Task {
-            entry_adapter: "".to_string(),
-            ..sample_task(VisibleRepos::All)
+        let empty_path = WorkspaceSlot {
+            path: PathBuf::new(),
+            ..sample_slot()
         };
-        assert!(empty_adapter.validate().is_err());
+        assert!(empty_path.validate().is_err());
 
-        let empty_repo = sample_task(VisibleRepos::Selected(vec!["".to_string()]));
-        assert!(empty_repo.validate().is_err());
+        let empty_checkout = WorkspaceSlot {
+            last_checkout: Some("".to_string()),
+            ..sample_slot()
+        };
+        assert!(empty_checkout.validate().is_err());
 
-        assert!(
-            sample_task(VisibleRepos::Selected(vec!["app".to_string()]))
-                .validate()
-                .is_ok()
-        );
+        assert!(sample_slot().validate().is_ok());
+    }
+
+    #[test]
+    fn workspace_context_validate_rejects_invalid_payloads() {
+        assert!(WorkspaceContext::new(sample_slot()).validate().is_ok());
+
+        let invalid = WorkspaceContext {
+            schema_version: 0,
+            slot: sample_slot(),
+        };
+        assert!(invalid.validate().is_err());
     }
 }
