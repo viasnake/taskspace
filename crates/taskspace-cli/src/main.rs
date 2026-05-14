@@ -177,7 +177,10 @@ fn run_with_cli(cli: Cli) -> Result<Vec<String>, TaskspaceError> {
     }
 }
 
-fn run_project_command(app: &TaskspaceApp, command: ProjectCommands) -> Result<Vec<String>, TaskspaceError> {
+fn run_project_command(
+    app: &TaskspaceApp,
+    command: ProjectCommands,
+) -> Result<Vec<String>, TaskspaceError> {
     match command {
         ProjectCommands::Add { project, source } => app
             .add_project(&project, &source.display().to_string())
@@ -194,7 +197,10 @@ fn run_project_command(app: &TaskspaceApp, command: ProjectCommands) -> Result<V
     }
 }
 
-fn run_slot_command(app: &TaskspaceApp, command: SlotCommands) -> Result<Vec<String>, TaskspaceError> {
+fn run_slot_command(
+    app: &TaskspaceApp,
+    command: SlotCommands,
+) -> Result<Vec<String>, TaskspaceError> {
     match command {
         SlotCommands::Add { project, count } => app
             .add_slots(&project, count)
@@ -205,7 +211,10 @@ fn run_slot_command(app: &TaskspaceApp, command: SlotCommands) -> Result<Vec<Str
                 .list_slots_for_project(&project)
                 .map(render::slot_list)
                 .map_err(map_anyhow_error),
-            None => app.list_slots().map(render::slot_list).map_err(map_anyhow_error),
+            None => app
+                .list_slots()
+                .map(render::slot_list)
+                .map_err(map_anyhow_error),
         },
         SlotCommands::Show { slot } => app
             .show_slot(&slot)
@@ -218,7 +227,9 @@ fn run_slot_command(app: &TaskspaceApp, command: SlotCommands) -> Result<Vec<Str
     }
 }
 
-fn render_sync_result(result: taskspace_app::SyncSlotsResult) -> Result<Vec<String>, TaskspaceError> {
+fn render_sync_result(
+    result: taskspace_app::SyncSlotsResult,
+) -> Result<Vec<String>, TaskspaceError> {
     if result.has_failures() {
         Err(TaskspaceError::ExternalCommand(render::sync_error(&result)))
     } else {

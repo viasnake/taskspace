@@ -297,9 +297,11 @@ mod tests {
 
     #[test]
     fn workspace_context_validate_rejects_invalid_payloads() {
-        assert!(WorkspaceContext::new(sample_project(), sample_slot())
-            .validate()
-            .is_ok());
+        assert!(
+            WorkspaceContext::new(sample_project(), sample_slot())
+                .validate()
+                .is_ok()
+        );
 
         let invalid = WorkspaceContext {
             schema_version: 1,

@@ -201,9 +201,12 @@ impl TaskspaceApp {
 
         let slot_yaml = self.slot_yaml_path(slot.project_id.as_str(), slot.id.as_str());
         if slot_yaml.exists() {
-            fs::remove_file(&slot_yaml).map_err(|err| anyhow!(TaskspaceError::Io(err.to_string())))?;
+            fs::remove_file(&slot_yaml)
+                .map_err(|err| anyhow!(TaskspaceError::Io(err.to_string())))?;
         }
-        let slot_state_dir = self.project_slots_dir(slot.project_id.as_str()).join(slot.id.as_str());
+        let slot_state_dir = self
+            .project_slots_dir(slot.project_id.as_str())
+            .join(slot.id.as_str());
         if slot_state_dir.exists() {
             remove_dir_all(&slot_state_dir).map_err(map_infra_error)?;
         }
@@ -308,7 +311,8 @@ impl TaskspaceApp {
 
     fn load_project(&self, project_ref: &str) -> Result<Project> {
         let project_id = ProjectId::parse(project_ref)?;
-        let raw = read_file(&self.project_yaml_path(project_id.as_str())).map_err(map_infra_error)?;
+        let raw =
+            read_file(&self.project_yaml_path(project_id.as_str())).map_err(map_infra_error)?;
         let project: Project = serde_yaml::from_str(&raw)
             .map_err(|err| anyhow!(TaskspaceError::Corrupt(err.to_string())))?;
         project.validate()?;
@@ -342,8 +346,7 @@ impl TaskspaceApp {
         let slot: WorkspaceSlot = serde_yaml::from_str(&raw)
             .map_err(|err| anyhow!(TaskspaceError::Corrupt(err.to_string())))?;
         slot.validate()?;
-        if slot.project_id.as_str() != project_id.as_str() || slot.id.as_str() != slot_id.as_str()
-        {
+        if slot.project_id.as_str() != project_id.as_str() || slot.id.as_str() != slot_id.as_str() {
             return Err(anyhow!(TaskspaceError::Corrupt(format!(
                 "slot id mismatch in registry entry: project={} slot={}",
                 project_id.as_str(),
@@ -623,11 +626,13 @@ mod tests {
         let added = app.add_slots("app", Some(2)).expect("slot add");
         assert_eq!(added.slots.len(), 2);
         assert!(added.slots[0].path.join(".git").exists());
-        assert!(added.slots[0]
-            .path
-            .join(".taskspace")
-            .join("context.yaml")
-            .exists());
+        assert!(
+            added.slots[0]
+                .path
+                .join(".taskspace")
+                .join("context.yaml")
+                .exists()
+        );
 
         let projects = app.list_projects().expect("projects");
         assert_eq!(projects[0].id.as_str(), "app");
@@ -652,7 +657,11 @@ mod tests {
         app.init_workspace().expect("init");
         app.add_project("app", &source.display().to_string())
             .expect("project");
-        let slot = app.add_slots("app", Some(1)).expect("slot add").slots.remove(0);
+        let slot = app
+            .add_slots("app", Some(1))
+            .expect("slot add")
+            .slots
+            .remove(0);
 
         fs::write(slot.path.join("README.md"), "changed\n").expect("change");
         let err = app
@@ -660,9 +669,7 @@ mod tests {
             .expect_err("dirty slot should fail");
         assert!(err.to_string().contains("--force"));
 
-        let removed = app
-            .remove_slot("app:agent-1", true)
-            .expect("force remove");
+        let removed = app.remove_slot("app:agent-1", true).expect("force remove");
         assert_eq!(removed.slot.id.as_str(), "agent-1");
         assert!(!removed.slot.path.exists());
     }
@@ -678,7 +685,11 @@ mod tests {
         app.init_workspace().expect("init");
         app.add_project("app", &source.display().to_string())
             .expect("project");
-        let slot = app.add_slots("app", Some(1)).expect("slot add").slots.remove(0);
+        let slot = app
+            .add_slots("app", Some(1))
+            .expect("slot add")
+            .slots
+            .remove(0);
 
         let result = app.sync_project("app").expect("sync");
         assert_eq!(result.statuses.len(), 1);

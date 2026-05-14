@@ -94,11 +94,7 @@ fn binary_show_sync_and_hook_context_work() {
     let root = temp.path().join("taskspace");
 
     let mut init = Command::cargo_bin("taskspace").expect("binary");
-    init.arg("--root")
-        .arg(&root)
-        .arg("init")
-        .assert()
-        .success();
+    init.arg("--root").arg(&root).arg("init").assert().success();
 
     let mut project_add = Command::cargo_bin("taskspace").expect("binary");
     project_add

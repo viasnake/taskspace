@@ -7,7 +7,10 @@ use taskspace_app::{
 use taskspace_core::{Project, WorkspaceSlot};
 
 pub fn initialized(result: InitWorkspaceResult) -> Vec<String> {
-    vec![format!("initialized taskspace at {}", result.root.display())]
+    vec![format!(
+        "initialized taskspace at {}",
+        result.root.display()
+    )]
 }
 
 pub fn project_added(result: AddProjectResult) -> Vec<String> {
@@ -47,13 +50,7 @@ pub fn slots_added(result: AddSlotsResult) -> Vec<String> {
     result
         .slots
         .into_iter()
-        .map(|slot| {
-            format!(
-                "{}\t{}",
-                slot.slot_ref().as_string(),
-                slot.path.display()
-            )
-        })
+        .map(|slot| format!("{}\t{}", slot.slot_ref().as_string(), slot.path.display()))
         .collect()
 }
 
@@ -115,7 +112,11 @@ pub fn sync_result(result: &SyncSlotsResult) -> Vec<String> {
 }
 
 pub fn sync_error(result: &SyncSlotsResult) -> String {
-    let failed = result.statuses.iter().filter(|status| !status.success).count();
+    let failed = result
+        .statuses
+        .iter()
+        .filter(|status| !status.success)
+        .count();
     let mut lines = vec![format!("sync failed for {failed} slot(s)")];
     lines.extend(sync_result(result));
     lines.join("\n")
@@ -166,7 +167,10 @@ mod tests {
             vec!["initialized taskspace at /tmp/taskspace".to_string()]
         );
 
-        assert_eq!(project_list(Vec::new()), vec!["no projects found".to_string()]);
+        assert_eq!(
+            project_list(Vec::new()),
+            vec!["no projects found".to_string()]
+        );
         assert_eq!(slot_list(Vec::new()), vec!["no slots found".to_string()]);
 
         let detail = slot_detail(sample_slot());

@@ -35,7 +35,7 @@ Each workspace also contains `.taskspace/context.yaml`. Codex hooks and other lo
 ### mise
 
 ```bash
-mise use -g github:viasnake/taskspace@v0.6.0
+mise use -g github:viasnake/taskspace@v0.6.1
 ```
 
 ### Homebrew
