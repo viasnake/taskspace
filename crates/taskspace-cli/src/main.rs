@@ -284,6 +284,8 @@ const BASH_COMPLETION: &str = r#"_taskspace() {
         project)
             if [[ ${COMP_CWORD} -eq 2 ]]; then
                 COMPREPLY=( $(compgen -W "add list show" -- "$cur") )
+            elif [[ "$subcmd" == "add" && ${COMP_CWORD} -eq 3 ]]; then
+                COMPREPLY=()
             elif [[ "$subcmd" == "show" && ${COMP_CWORD} -eq 3 ]]; then
                 COMPREPLY=( $(compgen -W "$(taskspace __complete-projects 2>/dev/null)" -- "$cur") )
             fi
@@ -293,20 +295,34 @@ const BASH_COMPLETION: &str = r#"_taskspace() {
                 COMPREPLY=( $(compgen -W "add list show remove" -- "$cur") )
             elif [[ "$subcmd" == "add" && ${COMP_CWORD} -eq 3 ]]; then
                 COMPREPLY=( $(compgen -W "$(taskspace __complete-projects 2>/dev/null)" -- "$cur") )
+            elif [[ "$subcmd" == "add" && "$prev" == "--count" ]]; then
+                COMPREPLY=()
+            elif [[ "$subcmd" == "add" && ${COMP_CWORD} -ge 4 ]]; then
+                COMPREPLY=( $(compgen -W "--count" -- "$cur") )
             elif [[ "$subcmd" == "list" && ${COMP_CWORD} -eq 3 ]]; then
                 COMPREPLY=( $(compgen -W "$(taskspace __complete-projects 2>/dev/null)" -- "$cur") )
             elif [[ ( "$subcmd" == "show" || "$subcmd" == "remove" ) && ${COMP_CWORD} -eq 3 ]]; then
                 COMPREPLY=( $(compgen -W "$(taskspace __complete-slot-refs 2>/dev/null)" -- "$cur") )
+            elif [[ "$subcmd" == "remove" && ${COMP_CWORD} -ge 4 ]]; then
+                COMPREPLY=( $(compgen -W "--force" -- "$cur") )
             fi
             ;;
         sync)
-            if [[ ${COMP_CWORD} -eq 2 ]]; then
+            if [[ "$prev" == "--all" ]]; then
+                COMPREPLY=()
+            elif [[ "$cur" == --* ]]; then
+                COMPREPLY=( $(compgen -W "--all" -- "$cur") )
+            elif [[ ${COMP_CWORD} -eq 2 ]]; then
                 COMPREPLY=( $(compgen -W "--all $(taskspace __complete-projects 2>/dev/null)" -- "$cur") )
             fi
             ;;
         enter)
             if [[ ${COMP_CWORD} -eq 2 ]]; then
                 COMPREPLY=( $(compgen -W "$(taskspace __complete-slot-refs 2>/dev/null)" -- "$cur") )
+            elif [[ "$prev" == "--agent" ]]; then
+                COMPREPLY=( $(compgen -W "codex opencode" -- "$cur") )
+            elif [[ ${COMP_CWORD} -ge 3 ]]; then
+                COMPREPLY=( $(compgen -W "--agent --no-sync" -- "$cur") )
             fi
             ;;
         completion)
@@ -323,11 +339,12 @@ complete -F _taskspace taskspace
 const ZSH_COMPLETION: &str = r#"#compdef taskspace
 
 _taskspace() {
-    local -a commands project_sub slot_sub projects slots shells
+    local -a commands project_sub slot_sub projects slots shells agents
     commands=(init project slot sync enter hook-context completion)
     project_sub=(add list show)
     slot_sub=(add list show remove)
     shells=(bash zsh fish)
+    agents=(codex opencode)
 
     if (( CURRENT == 2 )); then
         compadd -a commands
@@ -338,6 +355,8 @@ _taskspace() {
         project)
             if (( CURRENT == 3 )); then
                 compadd -a project_sub
+            elif [[ "$words[3]" == "add" && CURRENT == 4 ]]; then
+                return
             elif [[ "$words[3]" == "show" && CURRENT == 4 ]]; then
                 projects=("${(@f)$(taskspace __complete-projects 2>/dev/null)}")
                 compadd -a projects
@@ -346,12 +365,19 @@ _taskspace() {
         slot)
             if (( CURRENT == 3 )); then
                 compadd -a slot_sub
-            elif [[ ( "$words[3]" == "add" || "$words[3]" == "list" ) && CURRENT == 4 ]]; then
+            elif [[ "$words[3]" == "add" && CURRENT == 4 ]]; then
+                projects=("${(@f)$(taskspace __complete-projects 2>/dev/null)}")
+                compadd -a projects
+            elif [[ "$words[3]" == "add" && CURRENT >= 5 ]]; then
+                compadd -- --count
+            elif [[ "$words[3]" == "list" && CURRENT == 4 ]]; then
                 projects=("${(@f)$(taskspace __complete-projects 2>/dev/null)}")
                 compadd -a projects
             elif [[ ( "$words[3]" == "show" || "$words[3]" == "remove" ) && CURRENT == 4 ]]; then
                 slots=("${(@f)$(taskspace __complete-slot-refs 2>/dev/null)}")
                 compadd -a slots
+            elif [[ "$words[3]" == "remove" && CURRENT >= 5 ]]; then
+                compadd -- --force
             fi
             ;;
         sync)
@@ -365,6 +391,10 @@ _taskspace() {
             if (( CURRENT == 3 )); then
                 slots=("${(@f)$(taskspace __complete-slot-refs 2>/dev/null)}")
                 compadd -a slots
+            elif [[ "$words[CURRENT-1]" == "--agent" ]]; then
+                compadd -a agents
+            elif (( CURRENT >= 4 )); then
+                compadd -- --agent --no-sync
             fi
             ;;
         completion)
@@ -383,9 +413,17 @@ complete -c taskspace -n "not __fish_seen_subcommand_from init project slot sync
 complete -c taskspace -n "__fish_seen_subcommand_from project; and not __fish_seen_subcommand_from add list show" -a "add list show"
 complete -c taskspace -n "__fish_seen_subcommand_from slot; and not __fish_seen_subcommand_from add list show remove" -a "add list show remove"
 complete -c taskspace -n "__fish_seen_subcommand_from project show" -a "(taskspace __complete-projects 2>/dev/null)"
-complete -c taskspace -n "__fish_seen_subcommand_from slot add slot list" -a "(taskspace __complete-projects 2>/dev/null)"
-complete -c taskspace -n "__fish_seen_subcommand_from slot show slot remove enter" -a "(taskspace __complete-slot-refs 2>/dev/null)"
+complete -c taskspace -n "__fish_seen_subcommand_from slot; and __fish_seen_subcommand_from add; and not __fish_seen_subcommand_from --count" -a "(taskspace __complete-projects 2>/dev/null)"
+complete -c taskspace -n "__fish_seen_subcommand_from slot; and __fish_seen_subcommand_from add" -l count
+complete -c taskspace -n "__fish_seen_subcommand_from slot; and __fish_seen_subcommand_from list" -a "(taskspace __complete-projects 2>/dev/null)"
+complete -c taskspace -n "__fish_seen_subcommand_from slot; and __fish_seen_subcommand_from show" -a "(taskspace __complete-slot-refs 2>/dev/null)"
+complete -c taskspace -n "__fish_seen_subcommand_from slot; and __fish_seen_subcommand_from remove" -a "(taskspace __complete-slot-refs 2>/dev/null)"
+complete -c taskspace -n "__fish_seen_subcommand_from slot; and __fish_seen_subcommand_from remove" -l force
 complete -c taskspace -n "__fish_seen_subcommand_from sync" -a "(taskspace __complete-projects 2>/dev/null)"
+complete -c taskspace -n "__fish_seen_subcommand_from sync" -l all
+complete -c taskspace -n "__fish_seen_subcommand_from enter" -a "(taskspace __complete-slot-refs 2>/dev/null)"
+complete -c taskspace -n "__fish_seen_subcommand_from enter; and not __fish_seen_subcommand_from codex opencode" -l agent -a "codex opencode"
+complete -c taskspace -n "__fish_seen_subcommand_from enter" -l no-sync
 complete -c taskspace -n "__fish_seen_subcommand_from completion" -a "bash zsh fish"
 "#;
 
@@ -406,5 +444,14 @@ mod tests {
         })
         .expect("project list");
         assert_eq!(out, vec!["no projects found".to_string()]);
+    }
+
+    #[test]
+    fn completion_scripts_cover_current_flags() {
+        assert!(BASH_COMPLETION.contains("--count"));
+        assert!(BASH_COMPLETION.contains("--agent --no-sync"));
+        assert!(ZSH_COMPLETION.contains("agents=(codex opencode)"));
+        assert!(FISH_COMPLETION.contains("-l force"));
+        assert!(FISH_COMPLETION.contains("-l no-sync"));
     }
 }
